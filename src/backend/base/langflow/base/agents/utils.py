@@ -42,9 +42,23 @@ def data_to_messages(data: list[Data]) -> list[BaseMessage]:
         data (List[Data]): The data to convert.
 
     Returns:
-        List[Message]: The data as messages.
+        List[Message]: The data as messages with non-empty content.
     """
-    return [value.to_lc_message() for value in data]
+    from langflow.logging import logger
+    
+    messages = []
+    for value in data:
+        try:
+            message = value.to_lc_message()
+            # Validate message content is not empty
+            if not message.content or (isinstance(message.content, str) and not message.content.strip()):
+                logger.warning(f"Skipping message with empty content: {message}")
+                continue
+            messages.append(message)
+        except Exception as e:
+            logger.warning(f"Error converting data to message: {e}. Skipping this message.")
+            continue
+    return messages
 
 
 def validate_and_create_xml_agent(

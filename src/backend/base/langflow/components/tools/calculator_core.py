@@ -32,7 +32,13 @@ class CalculatorComponent(Component):
     ]
 
     outputs = [
-        Output(display_name="Data", name="result", type_=Data, method="evaluate_expression"),
+        Output(
+            display_name="Calculator Result", 
+            name="result", 
+            type_=Data, 
+            method="evaluate_expression", 
+            tool_name="calculate",
+        ),
     ]
 
     def _eval_expr(self, node: ast.AST) -> float:

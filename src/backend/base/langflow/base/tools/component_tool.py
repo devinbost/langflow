@@ -227,8 +227,22 @@ class ComponentToolkit:
             else:
                 args_schema = create_input_schema(self.component.inputs)
 
-            name = f"{output.method}".strip(".")
+            # Use tool_name from Output if available (preferred approach)
+            # Output has a dedicated tool_name field that should be used when provided
+            name = None
+            if hasattr(output, "tool_name") and getattr(output, "tool_name"):
+                name = getattr(output, "tool_name")
+                from langflow.logging import logger
+                logger.info(f"Using explicit tool_name: {name} from output definition")
+            else:
+                # Fallback to method name if tool_name isn't specified
+                name = f"{output.method}".strip(".")
+                
             formatted_name = _format_tool_name(name)
+            
+            # Log the tool name for debugging
+            from langflow.logging import logger
+            logger.info(f"Creating tool with name: {name} -> {formatted_name} (method: {output.method})")
             event_manager = self.component._event_manager
             if asyncio.iscoroutinefunction(output_method):
                 tools.append(

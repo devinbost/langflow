@@ -122,6 +122,8 @@ class LCAgentComponent(Component):
         self,
         agent: Runnable | BaseSingleActionAgent | BaseMultiActionAgent | AgentExecutor,
     ) -> Message:
+        from langflow.logging import logger
+        
         if isinstance(agent, AgentExecutor):
             runnable = agent
         else:
@@ -138,11 +140,73 @@ class LCAgentComponent(Component):
                 verbose=verbose,
                 max_iterations=max_iterations,
             )
-        input_dict: dict[str, str | list[BaseMessage]] = {"input": self.input_value}
-        if hasattr(self, "system_prompt"):
+            
+        # Initialize input dictionary with sane defaults
+        input_dict: dict[str, str | list[BaseMessage]] = {}
+        
+        # Ensure input_value has content
+        if hasattr(self, "input_value") and self.input_value and len(str(self.input_value).strip()) > 0:
+            input_dict["input"] = self.input_value
+            logger.info(f"Using user-provided input: {str(self.input_value)[:50]}...")
+        else:
+            default_input = "What can you help me with?"
+            input_dict["input"] = default_input
+            logger.warning(f"Input value was empty or missing, using default: '{default_input}'")
+            # Set it on the component for consistency
+            self.input_value = default_input
+            
+        # Ensure system_prompt has content
+        if hasattr(self, "system_prompt") and self.system_prompt and len(str(self.system_prompt).strip()) > 0:
+            # Check for NVIDIA model and detailed_thinking
+            is_nvidia = False
+            has_detailed_thinking = False
+            
+            # Check if this is a NVIDIA model with detailed_thinking
+            if hasattr(self, "agent_llm") and self.agent_llm == "NVIDIA":
+                is_nvidia = True
+                if hasattr(self, "detailed_thinking") and isinstance(self.detailed_thinking, bool) and self.detailed_thinking:
+                    has_detailed_thinking = True
+            
+            # Special handling for NVIDIA with detailed_thinking
+            if is_nvidia and has_detailed_thinking and "detailed thinking on" not in str(self.system_prompt).lower():
+                # Add the directive at the beginning of the prompt
+                self.system_prompt = f"detailed thinking on\n\n{self.system_prompt}"
+                logger.info("Added 'detailed thinking on' directive to system prompt for NVIDIA model")
+                
             input_dict["system_prompt"] = self.system_prompt
+            logger.info(f"Using system prompt: {str(self.system_prompt)[:50]}...")
+        else:
+            default_system = "You are a helpful assistant that can use tools to answer questions and perform tasks."
+            input_dict["system_prompt"] = default_system
+            logger.warning(f"System prompt was empty or missing, using default: '{default_system}'")
+            # Set it on the component for consistency
+            self.system_prompt = default_system
+            
+        # Add chat history if available
         if hasattr(self, "chat_history") and self.chat_history:
-            input_dict["chat_history"] = data_to_messages(self.chat_history)
+            chat_messages = data_to_messages(self.chat_history)
+            if chat_messages:
+                input_dict["chat_history"] = chat_messages
+                logger.info(f"Added {len(chat_messages)} chat history messages")
+            else:
+                logger.warning("Chat history was available but empty after conversion")
+        else:
+            logger.info("No chat history available")
+            
+        # Debug log the input dictionary with detailed type information
+        logger.info(f"Agent input dictionary prepared with keys: {list(input_dict.keys())}")
+        logger.info(f"Input value (type: {type(input_dict.get('input', '')).__name__}): '{str(input_dict.get('input', ''))[:50]}...'")
+        logger.info(f"System prompt (type: {type(input_dict.get('system_prompt', '')).__name__}): '{str(input_dict.get('system_prompt', ''))[:50]}...'")
+        
+        # Double-check for empty values and fix them
+        for key, value in list(input_dict.items()):
+            if value is None or (isinstance(value, str) and not value.strip()):
+                if key == "input":
+                    input_dict[key] = "What can you help me with?"
+                    logger.warning(f"Empty value detected for {key}, replacing with default")
+                elif key == "system_prompt":
+                    input_dict[key] = "You are a helpful assistant that can use tools to answer questions and perform tasks."
+                    logger.warning(f"Empty value detected for {key}, replacing with default")
 
         if hasattr(self, "graph"):
             session_id = self.graph.session_id
@@ -158,12 +222,71 @@ class LCAgentComponent(Component):
             content_blocks=[ContentBlock(title="Agent Steps", contents=[])],
             session_id=session_id,
         )
+        
+        # Extra validation and debug to troubleshoot API errors
+        for key, value in list(input_dict.items()):
+            if isinstance(value, str) and not value.strip():
+                # Replace empty strings with defaults to avoid API errors
+                if key == "input":
+                    input_dict[key] = "What can you help me with?"
+                    logger.warning(f"Empty string detected for {key}, using default")
+                elif key == "system_prompt":
+                    input_dict[key] = "You are a helpful assistant that can use tools to answer questions and perform tasks."
+                    logger.warning(f"Empty string detected for {key}, using default")
+        
+        # Final safety check - ensure absolutely all values are non-empty
+        if "input" not in input_dict or not input_dict["input"]:
+            input_dict["input"] = "What can you help me with?"
+            logger.warning("Missing 'input' in final dictionary check, adding default")
+            
+        if "system_prompt" not in input_dict or not input_dict["system_prompt"]:
+            input_dict["system_prompt"] = "You are a helpful assistant that can use tools to answer questions and perform tasks."
+            logger.warning("Missing 'system_prompt' in final dictionary check, adding default")
+            
+        # Ensure all required prompt variables exist to prevent errors
+        # These are typically needed by message templates
+        required_keys = ["agent_scratchpad"]
+        for key in required_keys:
+            if key not in input_dict:
+                input_dict[key] = ""
+                logger.info(f"Added required key '{key}' to input dictionary with empty value")
+            
+        # Now check specifically for NVIDIA models with detailed_thinking again
+        # This is a safeguard to ensure the detailed_thinking directive is not lost during processing
+        if (hasattr(self, "agent_llm") and self.agent_llm == "NVIDIA" and 
+            hasattr(self, "detailed_thinking") and isinstance(self.detailed_thinking, bool) and 
+            self.detailed_thinking and "system_prompt" in input_dict):
+            
+            system_prompt = input_dict["system_prompt"]
+            if isinstance(system_prompt, str) and "detailed thinking on" not in system_prompt.lower():
+                logger.info("Re-adding detailed thinking directive that was lost during processing")
+                input_dict["system_prompt"] = f"detailed thinking on\n\n{system_prompt}"
+            
+        # Final log of sanitized input with type information for debugging
+        safe_dict_for_logging = {}
+        for k, v in input_dict.items():
+            if k == "chat_history":
+                safe_dict_for_logging[k] = f"[{len(v)} messages]" if isinstance(v, list) else str(v)
+            else:
+                safe_dict_for_logging[k] = f"{str(v)[:30]}... (type: {type(v).__name__})"
+                
+        logger.info(f"Final input dictionary: {safe_dict_for_logging}")
+        
         try:
+            # Add event stream debug configuration
+            config = {
+                "callbacks": [AgentAsyncHandler(self.log), *self.get_langchain_callbacks()],
+                "version": "v2",
+                # Enable more detailed tracing for debugging
+                "recursion_limit": 25,  # Allow deeper recursion for complex agent logic
+            }
+            
+            # Stream events from the agent
+            logger.info("Starting agent event stream processing")
             result = await process_agent_events(
                 runnable.astream_events(
                     input_dict,
-                    config={"callbacks": [AgentAsyncHandler(self.log), *self.get_langchain_callbacks()]},
-                    version="v2",
+                    config=config,
                 ),
                 agent_message,
                 cast("SendMessageFunctionType", self.send_message),

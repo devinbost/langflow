@@ -100,20 +100,42 @@ class AgentComponent(ToolCallingAgentComponent):
                 raise ValueError(msg)
 
             # Set up and run agent
-            # Create base params for the agent
+            # Create base params for the agent with required fields
             agent_params = {
                 "llm": llm_model,
                 "tools": self.tools,
-                "chat_history": self.chat_history,
-                "input_value": self.input_value,
-                "system_prompt": self.system_prompt,
             }
             
-            # Check if this is a NVIDIA model and add detailed_thinking if it exists
-            if hasattr(self, 'detailed_thinking'):
+            # Ensure input_value has a value
+            if hasattr(self, 'input_value') and self.input_value:
+                agent_params["input_value"] = self.input_value
+            else:
+                agent_params["input_value"] = "What can you help me with?"
+                logger.warning("Input value was empty or missing, using default")
+            
+            # Ensure system_prompt has a value
+            if hasattr(self, 'system_prompt') and self.system_prompt:
+                agent_params["system_prompt"] = self.system_prompt
+            else:
+                agent_params["system_prompt"] = "You are a helpful assistant that can use tools to answer questions and perform tasks."
+                logger.warning("System prompt was empty or missing, using default")
+            
+            # Add chat_history if available
+            if self.chat_history is not None:
+                agent_params["chat_history"] = self.chat_history
+            
+            # Special handling for model-specific parameters (like detailed_thinking for NVIDIA)
+            # Use model_name to check if it's an NVIDIA model
+            if self.agent_llm == "NVIDIA" and hasattr(self, 'detailed_thinking') and isinstance(self.detailed_thinking, bool):
                 agent_params["detailed_thinking"] = self.detailed_thinking
-                
-            self.set(**agent_params)
+                logger.info(f"Setting detailed_thinking={self.detailed_thinking} for NVIDIA model in agent parameters")
+            
+            # Set the parameters on self
+            try:
+                self.set(**agent_params)
+            except Exception as e:
+                logger.error(f"Error setting agent parameters: {e}")
+                raise
             agent = self.create_agent_runnable()
             return await self.run_agent(agent)
 
@@ -159,26 +181,64 @@ class AgentComponent(ToolCallingAgentComponent):
             raise ValueError(msg) from e
 
     def _build_llm_model(self, component, inputs, prefix=""):
-        model_kwargs = {input_.name: getattr(self, f"{prefix}{input_.name}") for input_ in inputs}
+        # Create a dictionary of valid input parameters
+        model_kwargs = {}
         
-        # For NVIDIA models, add detailed_thinking if it exists
-        if self.agent_llm == "NVIDIA" and hasattr(self, "detailed_thinking"):
-            model_kwargs["detailed_thinking"] = self.detailed_thinking
-            
-        return component.set(**model_kwargs).build_model()
+        # Safely get input values that exist
+        for input_ in inputs:
+            param_name = f"{prefix}{input_.name}"
+            if hasattr(self, param_name) and getattr(self, param_name) is not None:
+                model_kwargs[input_.name] = getattr(self, param_name)
+        
+        # Special handling for NVIDIA models
+        if self.agent_llm == "NVIDIA":
+            # Set tool_model_enabled if not already present
+            if "tool_model_enabled" not in model_kwargs:
+                model_kwargs["tool_model_enabled"] = False
+                
+            # Add detailed_thinking only if it's a valid boolean (True/False)
+            if hasattr(self, "detailed_thinking") and isinstance(self.detailed_thinking, bool):
+                model_kwargs["detailed_thinking"] = self.detailed_thinking
+        
+        # Build and return the model
+        try:
+            return component.set(**model_kwargs).build_model()
+        except Exception as e:
+            logger.error(f"Error building LLM model with params: {model_kwargs}")
+            raise
 
     def set_component_params(self, component):
         provider_info = MODEL_PROVIDERS_DICT.get(self.agent_llm)
         if provider_info:
             inputs = provider_info.get("inputs")
             prefix = provider_info.get("prefix")
-            model_kwargs = {input_.name: getattr(self, f"{prefix}{input_.name}") for input_ in inputs}
             
-            # For NVIDIA models, add detailed_thinking if it exists
-            if self.agent_llm == "NVIDIA" and hasattr(self, "detailed_thinking"):
-                model_kwargs["detailed_thinking"] = self.detailed_thinking
+            # Create a dictionary of valid input parameters
+            model_kwargs = {}
+            
+            # Safely get input values that exist and are not None
+            for input_ in inputs:
+                param_name = f"{prefix}{input_.name}"
+                if hasattr(self, param_name) and getattr(self, param_name) is not None:
+                    model_kwargs[input_.name] = getattr(self, param_name)
+            
+            # Special handling for NVIDIA models
+            if self.agent_llm == "NVIDIA":
+                # Set tool_model_enabled if not already present
+                if "tool_model_enabled" not in model_kwargs:
+                    model_kwargs["tool_model_enabled"] = False
+                    
+                # Add detailed_thinking only if it's a valid boolean (True/False)
+                if hasattr(self, "detailed_thinking") and isinstance(self.detailed_thinking, bool):
+                    model_kwargs["detailed_thinking"] = self.detailed_thinking
 
-            return component.set(**model_kwargs)
+            # Set the parameters on the component
+            try:
+                return component.set(**model_kwargs)
+            except Exception as e:
+                logger.error(f"Error setting component parameters: {model_kwargs}")
+                raise
+                
         return component
 
     def delete_fields(self, build_config: dotdict, fields: dict | list[str]) -> None:

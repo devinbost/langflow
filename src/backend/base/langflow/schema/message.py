@@ -135,7 +135,13 @@ class Message(Data):
         # they are: "text", "sender"
         if self.text is None or not self.sender:
             logger.warning("Missing required keys ('text', 'sender') in Message, defaulting to HumanMessage.")
+        
         text = "" if not isinstance(self.text, str) else self.text
+        
+        # Validate text is not empty to prevent API errors
+        if not text.strip():
+            logger.warning(f"Empty message content detected in Message object, using placeholder: {self}")
+            text = "[Empty message content]"
 
         if self.sender == MESSAGE_SENDER_USER or not self.sender:
             if self.files:

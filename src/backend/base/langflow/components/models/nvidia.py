@@ -135,6 +135,7 @@ class NVIDIAModelComponent(LCModelComponent):
     def build_model(self) -> LanguageModel:  # type: ignore[type-var]
         try:
             from langchain_nvidia_ai_endpoints import ChatNVIDIA
+            from langchain_nvidia_ai_endpoints._common import _NVIDIAClient
         except ImportError as e:
             msg = "Please install langchain-nvidia-ai-endpoints to use the NVIDIA model."
             raise ImportError(msg) from e
@@ -143,11 +144,147 @@ class NVIDIAModelComponent(LCModelComponent):
         model_name: str = self.model_name
         max_tokens = self.max_tokens
         seed = self.seed
-        return ChatNVIDIA(
-            max_tokens=max_tokens or None,
-            model=model_name,
-            base_url=self.base_url,
-            api_key=api_key,
-            temperature=temperature or 0.1,
-            seed=seed,
-        )
+        # Prepare additional parameters
+        kwargs = {
+            "max_tokens": max_tokens or None,
+            "model": model_name,
+            "base_url": self.base_url,
+            "api_key": api_key,
+            "temperature": temperature or 0.1,
+            "seed": seed,
+            # Important: Enable tool support for agent use
+            "tool_configs": {"type": "json_object"},
+        }
+        
+        # Add detailed_thinking if it's enabled (as a boolean)
+        if hasattr(self, "detailed_thinking") and isinstance(self.detailed_thinking, bool) and self.detailed_thinking:
+            # The parameter will be carried through to signal this setting is enabled
+            kwargs["detailed_thinking"] = True
+            logger.info("NVIDIA model: detailed_thinking parameter enabled")
+        else:
+            logger.info("NVIDIA model: detailed_thinking parameter not enabled")
+            
+        # Create the model instance
+        try:
+            # Instead of patching the class method, we'll inject a payload validator directly into the model instance
+            original_model = ChatNVIDIA(**kwargs)
+            
+            # Store original post method
+            if hasattr(original_model, '_client') and hasattr(original_model._client, 'get_session_fn'):
+                original_session_fn = original_model._client.get_session_fn
+                
+                # Create patched session function
+                def patched_session_fn():
+                    session = original_session_fn()
+                    original_post = session.post
+                    
+                    # Create patched post method to fix messages
+                    def patched_post(*args, **kwargs):
+                        try:
+                            # Check if there's a JSON payload with messages
+                            if 'json' in kwargs and isinstance(kwargs['json'], dict):
+                                payload = kwargs['json']
+                                
+                                # Process and fix tools if present
+                                if 'tools' in payload:
+                                    tool_count = len(payload['tools'])
+                                    logger.info(f"NVIDIA API payload contains {tool_count} tools")
+                                    
+                                    # Process each tool to fix potential naming issues
+                                    for i, tool in enumerate(payload['tools']):
+                                        if 'function' in tool and isinstance(tool['function'], dict):
+                                            func_dict = tool['function']
+                                            
+                                            # Get current name
+                                            original_name = func_dict.get('name', 'unknown')
+                                            
+                                            # Simple function to fix duplicated tool names
+                                            def fix_duplicated_name(name):
+                                                # Special case for evaluate_expression
+                                                if name == "evaluate_expressionevaluate_expression":
+                                                    return "calculate"
+                                                
+                                                # Check for exact duplication
+                                                if name and len(name) >= 6:
+                                                    half_len = len(name) // 2
+                                                    first_half = name[:half_len]
+                                                    second_half = name[half_len:]
+                                                    
+                                                    if first_half == second_half:
+                                                        from langflow.logging import logger
+                                                        logger.warning(f"Detected duplicated tool name: {name} -> fixing to {first_half}")
+                                                        return first_half
+                                                
+                                                return name
+                                            
+                                            # Fix the name if needed
+                                            fixed_name = fix_duplicated_name(original_name)
+                                            if fixed_name != original_name:
+                                                func_dict['name'] = fixed_name
+                                                logger.warning(f"Fixed duplicated tool name in NVIDIA payload: {original_name} -> {fixed_name}")
+                                                logger.warning("This is a workaround for a known issue. The root cause may have been fixed.")
+                                            
+                                            # Log tool information
+                                            logger.info(f"Tool {i}: name={func_dict.get('name', 'unknown')}")
+                                
+                                # Fix message content in messages array
+                                if 'messages' in payload:
+                                    message_count = len(payload['messages'])
+                                    logger.info(f"NVIDIA API payload has {message_count} messages")
+                                    
+                                    # Process each message to fix empty content and check for tool calls
+                                    for i, msg in enumerate(payload['messages']):
+                                        # Get message type
+                                        msg_type = msg.get('role', 'unknown')
+                                        
+                                        # Log tool calls if present
+                                        if 'tool_calls' in msg and msg['tool_calls']:
+                                            for j, tool_call in enumerate(msg['tool_calls']):
+                                                logger.info(f"Message {i} contains tool call {j}: {tool_call}")
+                                        
+                                        # If this is an assistant message with tool_call_id, log it
+                                        if msg_type == 'assistant' and 'tool_call_id' in msg:
+                                            logger.info(f"Tool call response in message {i}: tool_call_id={msg.get('tool_call_id')}")
+                                            
+                                        # Fix messages with empty content
+                                        if 'content' not in msg or msg['content'] is None or msg['content'] == '':
+                                            logger.warning(f"NVIDIA API: Empty content in '{msg_type}' message at position {i}. Adding default content.")
+                                            
+                                            # Add default content based on message type
+                                            if msg_type == 'system':
+                                                msg['content'] = "You are a helpful assistant."
+                                            elif msg_type == 'assistant':
+                                                msg['content'] = "[AI thinking...]"
+                                            elif msg_type == 'user':
+                                                msg['content'] = "[User request]"
+                                            else:
+                                                msg['content'] = f"[Empty {msg_type} message]"
+                                        
+                                        # Also log if content contains potential tool references
+                                        if msg.get('content') and isinstance(msg['content'], str) and 'evaluate_expression' in msg['content']:
+                                            tool_reference = msg['content'][:200] + ('...' if len(msg['content']) > 200 else '')
+                                            logger.info(f"Message {i} contains potential tool reference: {tool_reference}")
+                                    
+                                    # Log the updated payload
+                                    logger.info(f"NVIDIA API: Fixed {message_count} messages in payload")
+                        except Exception as e:
+                            logger.error(f"Error in NVIDIA API payload processing: {e}")
+                        
+                        # Call original post method
+                        return original_post(*args, **kwargs)
+                    
+                    # Replace post method with patched version
+                    session.post = patched_post
+                    return session
+                
+                # Replace the session function with our patched version
+                original_model._client.get_session_fn = patched_session_fn
+                logger.info("Applied NVIDIA API message validation via session patching")
+            else:
+                logger.warning("Could not patch NVIDIA client - expected attributes not found")
+            
+            logger.info(f"NVIDIA ChatModel initialized with: model={kwargs.get('model')}, max_tokens={kwargs.get('max_tokens')}")
+            return original_model
+        except Exception as e:
+            logger.error(f"Failed to initialize NVIDIA model: {str(e)}")
+            raise
