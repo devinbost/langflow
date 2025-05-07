@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Iterator, AsyncIterator, List, Optional
 
 from loguru import logger
 from requests.exceptions import ConnectionError  # noqa: A004
@@ -9,6 +9,136 @@ from langflow.field_typing import LanguageModel
 from langflow.field_typing.range_spec import RangeSpec
 from langflow.inputs import BoolInput, DropdownInput, IntInput, MessageTextInput, SecretStrInput, SliderInput
 from langflow.schema.dotdict import dotdict
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.outputs import ChatResult, ChatGenerationChunk
+from langchain_core.callbacks import (
+    AsyncCallbackManagerForLLMRun,
+    CallbackManagerForLLMRun,
+)
+from langchain_core.messages import BaseMessage, AIMessage
+from langflow.utils.nvidia_utils import clean_nvidia_message_content
+
+
+class NvidiaChatModelOutputWrapper(BaseChatModel):
+    """
+    Wrapper around a ChatNVIDIA model (or any BaseChatModel) 
+    to clean its outputs from NVIDIA-specific duplications.
+    """
+    actual_llm: BaseChatModel 
+
+    def __init__(self, llm: BaseChatModel, **kwargs: Any):
+        # Pass kwargs to super to handle Pydantic model initialization if BaseChatModel expects it
+        super().__init__(**kwargs) 
+        object.__setattr__(self, "actual_llm", llm)
+
+    def _generate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        result: ChatResult = self.actual_llm._generate(
+            messages, stop=stop, run_manager=run_manager, **kwargs
+        )
+        # Ensure result.generations is not None and is a list before iterating
+        if result.generations and isinstance(result.generations, list):
+            for gen_idx, gen_item in enumerate(result.generations):
+                # Standard ChatResult has List[ChatGeneration], ChatGeneration has .message
+                if isinstance(gen_item, Generation) and hasattr(gen_item, "message") and isinstance(gen_item.message, (AIMessage, AIMessageChunk)):
+                    result.generations[gen_idx].message = clean_nvidia_message_content(gen_item.message) # type: ignore
+        return result
+
+    async def _agenerate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        result: ChatResult = await self.actual_llm._agenerate(
+            messages, stop=stop, run_manager=run_manager, **kwargs
+        )
+        if result.generations and isinstance(result.generations, list):
+            for gen_idx, gen_item in enumerate(result.generations):
+                 if isinstance(gen_item, Generation) and hasattr(gen_item, "message") and isinstance(gen_item.message, (AIMessage, AIMessageChunk)):
+                    result.generations[gen_idx].message = clean_nvidia_message_content(gen_item.message) # type: ignore
+        return result
+
+    def _stream(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        original_iterator = self.actual_llm._stream(
+            messages, stop=stop, run_manager=run_manager, **kwargs
+        )
+        for chunk in original_iterator:
+            # ChatGenerationChunk has .message which is an AIMessageChunk
+            if hasattr(chunk, "message") and isinstance(chunk.message, AIMessageChunk):
+                chunk.message = clean_nvidia_message_content(chunk.message) # type: ignore
+            yield chunk
+
+    async def _astream(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        original_iterator = self.actual_llm._astream(
+            messages, stop=stop, run_manager=run_manager, **kwargs
+        )
+        async for chunk in original_iterator:
+            if hasattr(chunk, "message") and isinstance(chunk.message, AIMessageChunk):
+                chunk.message = clean_nvidia_message_content(chunk.message) # type: ignore
+            yield chunk
+            
+    @property
+    def _llm_type(self) -> str:
+        # Ensure actual_llm is initialized
+        if hasattr(self, 'actual_llm') and hasattr(self.actual_llm, '_llm_type'):
+            return self.actual_llm._llm_type + "_cleaned_nvidia_wrapper"
+        return "nvidia_chat_model_cleaned_wrapper"
+
+
+    def __getattr__(self, name: str) -> Any:
+        if name == 'actual_llm' or name.startswith('_'): # Avoid recursion and private attributes
+             raise AttributeError(f"Attribute {name} not found or is private.")
+        try:
+            # Ensure actual_llm is initialized before trying to access its attributes
+            if hasattr(self, 'actual_llm'):
+                return getattr(self.actual_llm, name)
+            raise AttributeError("Wrapped LLM 'actual_llm' not initialized.")
+        except AttributeError:
+            raise AttributeError(
+                f"'{self.__class__.__name__}' (wrapping '{getattr(self, 'actual_llm', 'UninitializedLLM').__class__.__name__}') has no attribute '{name}'"
+            )
+    
+    # Delegate common properties required by Langchain
+    @property
+    def lc_serializable(self) -> bool:
+        if hasattr(self, 'actual_llm') and hasattr(self.actual_llm, 'lc_serializable'):
+            return self.actual_llm.lc_serializable
+        return False 
+
+    @property
+    def InputType(self) -> Any: 
+        if hasattr(self, 'actual_llm') and hasattr(self.actual_llm, 'InputType'):
+            return self.actual_llm.InputType
+        return super().InputType # Fallback to BaseChatModel's default
+
+    @property
+    def OutputType(self) -> Any: 
+        if hasattr(self, 'actual_llm') and hasattr(self.actual_llm, 'OutputType'):
+            return self.actual_llm.OutputType
+        return super().OutputType # Fallback to BaseChatModel's default
+
+    # Ensure to define all abstract methods from BaseChatModel if any are not covered by delegation
+    # For BaseChatModel, _generate, _agenerate are key. _stream, _astream have defaults that call them.
+    # If ChatNVIDIA implements _stream/_astream more efficiently, our wrapper should too.
 
 
 class NVIDIAModelComponent(LCModelComponent):
@@ -132,159 +262,64 @@ class NVIDIAModelComponent(LCModelComponent):
 
         return build_config
 
-    def build_model(self) -> LanguageModel:  # type: ignore[type-var]
+    def build_model(self) -> BaseLanguageModel:  # type: ignore[type-var]
         try:
             from langchain_nvidia_ai_endpoints import ChatNVIDIA
-            from langchain_nvidia_ai_endpoints._common import _NVIDIAClient
+            # from langchain_nvidia_ai_endpoints._common import _NVIDIAClient # Not needed directly here
         except ImportError as e:
             msg = "Please install langchain-nvidia-ai-endpoints to use the NVIDIA model."
+            logger.error(msg) # Added logger
             raise ImportError(msg) from e
-        api_key = self.api_key
-        temperature = self.temperature
-        model_name: str = self.model_name
-        max_tokens = self.max_tokens
-        seed = self.seed
-        # Prepare additional parameters
+        
+        api_key_value = self.api_key.get_secret_value() if isinstance(self.api_key, SecretStr) else self.api_key
+
         kwargs = {
-            "max_tokens": max_tokens or None,
-            "model": model_name,
+            "max_tokens": self.max_tokens or None,
+            "model": self.model_name,
             "base_url": self.base_url,
-            "api_key": api_key,
-            "temperature": temperature or 0.1,
-            "seed": seed,
-            # Important: Enable tool support for agent use
-            "tool_configs": {"type": "json_object"},
+            "api_key": api_key_value, # Use unwrapped secret
+            "temperature": self.temperature if self.temperature is not None else 0.1,
+            "seed": self.seed,
+            # "tool_configs": {"type": "json_object"}, # This might be specific to older versions or direct API calls
+                                                    # langchain_nvidia_ai_endpoints.ChatNVIDIA handles tool binding via .bind_tools()
         }
         
-        # Add detailed_thinking if it's enabled (as a boolean)
+        # Remove None valued keys to prevent issues with ChatNVIDIA constructor
+        kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
+
         if hasattr(self, "detailed_thinking") and isinstance(self.detailed_thinking, bool) and self.detailed_thinking:
-            # The parameter will be carried through to signal this setting is enabled
-            kwargs["detailed_thinking"] = True
-            logger.info("NVIDIA model: detailed_thinking parameter enabled")
+            kwargs["detailed_thinking"] = True # Assuming ChatNVIDIA supports this pass-through
+            logger.info("NVIDIA model: detailed_thinking parameter enabled in kwargs")
         else:
-            logger.info("NVIDIA model: detailed_thinking parameter not enabled")
+            logger.info("NVIDIA model: detailed_thinking parameter not enabled in kwargs")
             
-        # Create the model instance
+        # The patching logic for session.post can be removed if we are cleaning the response,
+        # unless it's vital for request formation (e.g., fixing tool definitions before sending).
+        # The user stated workarounds (which included patching) weren't working for the response issue.
+        # For now, I'll remove the complex patching to simplify, as we're focused on response cleaning.
+        # If request-side tool name fixing is still needed, the `fix_duplicated_name` in `patched_post`
+        # should target the `payload['tools'][i]['function']['name']` before the request is made.
+        # But let's first ensure response cleaning works.
+
         try:
-            # Instead of patching the class method, we'll inject a payload validator directly into the model instance
-            original_model = ChatNVIDIA(**kwargs)
+            chat_nvidia_model = ChatNVIDIA(**kwargs)
             
-            # Store original post method
-            if hasattr(original_model, '_client') and hasattr(original_model._client, 'get_session_fn'):
-                original_session_fn = original_model._client.get_session_fn
-                
-                # Create patched session function
-                def patched_session_fn():
-                    session = original_session_fn()
-                    original_post = session.post
-                    
-                    # Create patched post method to fix messages
-                    def patched_post(*args, **kwargs):
-                        try:
-                            # Check if there's a JSON payload with messages
-                            if 'json' in kwargs and isinstance(kwargs['json'], dict):
-                                payload = kwargs['json']
-                                
-                                # Process and fix tools if present
-                                if 'tools' in payload:
-                                    tool_count = len(payload['tools'])
-                                    logger.info(f"NVIDIA API payload contains {tool_count} tools")
-                                    
-                                    # Process each tool to fix potential naming issues
-                                    for i, tool in enumerate(payload['tools']):
-                                        if 'function' in tool and isinstance(tool['function'], dict):
-                                            func_dict = tool['function']
-                                            
-                                            # Get current name
-                                            original_name = func_dict.get('name', 'unknown')
-                                            
-                                            # Simple function to fix duplicated tool names
-                                            def fix_duplicated_name(name):
-                                                # Special case for evaluate_expression
-                                                if name == "evaluate_expressionevaluate_expression":
-                                                    return "calculate"
-                                                
-                                                # Check for exact duplication
-                                                if name and len(name) >= 6:
-                                                    half_len = len(name) // 2
-                                                    first_half = name[:half_len]
-                                                    second_half = name[half_len:]
-                                                    
-                                                    if first_half == second_half:
-                                                        from langflow.logging import logger
-                                                        logger.warning(f"Detected duplicated tool name: {name} -> fixing to {first_half}")
-                                                        return first_half
-                                                
-                                                return name
-                                            
-                                            # Fix the name if needed
-                                            fixed_name = fix_duplicated_name(original_name)
-                                            if fixed_name != original_name:
-                                                func_dict['name'] = fixed_name
-                                                logger.warning(f"Fixed duplicated tool name in NVIDIA payload: {original_name} -> {fixed_name}")
-                                                logger.warning("This is a workaround for a known issue. The root cause may have been fixed.")
-                                            
-                                            # Log tool information
-                                            logger.info(f"Tool {i}: name={func_dict.get('name', 'unknown')}")
-                                
-                                # Fix message content in messages array
-                                if 'messages' in payload:
-                                    message_count = len(payload['messages'])
-                                    logger.info(f"NVIDIA API payload has {message_count} messages")
-                                    
-                                    # Process each message to fix empty content and check for tool calls
-                                    for i, msg in enumerate(payload['messages']):
-                                        # Get message type
-                                        msg_type = msg.get('role', 'unknown')
-                                        
-                                        # Log tool calls if present
-                                        if 'tool_calls' in msg and msg['tool_calls']:
-                                            for j, tool_call in enumerate(msg['tool_calls']):
-                                                logger.info(f"Message {i} contains tool call {j}: {tool_call}")
-                                        
-                                        # If this is an assistant message with tool_call_id, log it
-                                        if msg_type == 'assistant' and 'tool_call_id' in msg:
-                                            logger.info(f"Tool call response in message {i}: tool_call_id={msg.get('tool_call_id')}")
-                                            
-                                        # Fix messages with empty content
-                                        if 'content' not in msg or msg['content'] is None or msg['content'] == '':
-                                            logger.warning(f"NVIDIA API: Empty content in '{msg_type}' message at position {i}. Adding default content.")
-                                            
-                                            # Add default content based on message type
-                                            if msg_type == 'system':
-                                                msg['content'] = "You are a helpful assistant."
-                                            elif msg_type == 'assistant':
-                                                msg['content'] = "[AI thinking...]"
-                                            elif msg_type == 'user':
-                                                msg['content'] = "[User request]"
-                                            else:
-                                                msg['content'] = f"[Empty {msg_type} message]"
-                                        
-                                        # Also log if content contains potential tool references
-                                        if msg.get('content') and isinstance(msg['content'], str) and 'evaluate_expression' in msg['content']:
-                                            tool_reference = msg['content'][:200] + ('...' if len(msg['content']) > 200 else '')
-                                            logger.info(f"Message {i} contains potential tool reference: {tool_reference}")
-                                    
-                                    # Log the updated payload
-                                    logger.info(f"NVIDIA API: Fixed {message_count} messages in payload")
-                        except Exception as e:
-                            logger.error(f"Error in NVIDIA API payload processing: {e}")
-                        
-                        # Call original post method
-                        return original_post(*args, **kwargs)
-                    
-                    # Replace post method with patched version
-                    session.post = patched_post
-                    return session
-                
-                # Replace the session function with our patched version
-                original_model._client.get_session_fn = patched_session_fn
-                logger.info("Applied NVIDIA API message validation via session patching")
-            else:
-                logger.warning("Could not patch NVIDIA client - expected attributes not found")
+            # Wrap the model instance
+            # Pass the original kwargs to the wrapper if it needs to initialize BaseChatModel fields
+            # Or pass specific fields BaseChatModel expects if its __init__ is not just **kwargs
+            wrapper_kwargs = {} # Collect necessary kwargs for BaseChatModel parent if needed
+            if hasattr(chat_nvidia_model, 'callbacks'):
+                wrapper_kwargs['callbacks'] = chat_nvidia_model.callbacks
+            if hasattr(chat_nvidia_model, 'verbose'):
+                wrapper_kwargs['verbose'] = chat_nvidia_model.verbose
+            # Add other relevant BaseChatModel fields if necessary for initialization
             
-            logger.info(f"NVIDIA ChatModel initialized with: model={kwargs.get('model')}, max_tokens={kwargs.get('max_tokens')}")
-            return original_model
+            wrapped_model = NvidiaChatModelOutputWrapper(llm=chat_nvidia_model, **wrapper_kwargs) 
+            
+            logger.info("Successfully built and wrapped ChatNVIDIA model for output cleaning.")
+            return wrapped_model
+
         except Exception as e:
-            logger.error(f"Failed to initialize NVIDIA model: {str(e)}")
+            logger.error(f"Error building or wrapping NVIDIA model: {e}", exc_info=True) # Added exc_info
             raise
