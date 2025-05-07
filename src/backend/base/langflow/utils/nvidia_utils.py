@@ -4,8 +4,10 @@ from typing import Optional, List, Dict, Any, Union
 
 # Assuming Langchain Core message types are accessible via langflow.schema
 # Adjust if direct langchain_core imports are standard for utility modules
-from langflow.schema.message import AIMessage, AIMessageChunk
-from langflow.field_typing.langchain_types import ToolCall # For AIMessage.tool_calls structure
+# Change imports to use langchain_core directly
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolCall
+# from langflow.schema.message import AIMessage, AIMessageChunk # REMOVED
+# from langflow.field_typing.langchain_types import ToolCall # REMOVED
 
 logger = logging.getLogger(__name__)
 
