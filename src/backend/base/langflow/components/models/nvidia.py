@@ -121,7 +121,7 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
         *args: Any, # Added *args
         **kwargs: Any,
     ) -> Runnable[LanguageModelInput, BaseMessage]:
-        \"\"\"Binds tools to the underlying LLM and returns the bound runnable.\"\"\"
+        """Delegates bind_tools call.""" # Simplified docstring
         # Delegate the call to the actual wrapped LLM instance
         actual_llm_instance = object.__getattribute__(self, 'actual_llm')
         
