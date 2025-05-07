@@ -49,6 +49,15 @@ class ToolCallingAgentComponent(LCToolsAgentComponent):
         ]
         prompt = ChatPromptTemplate.from_messages(messages)
         self.validate_tool_names()
+
+        # Add detailed_thinking to system prompt if it's enabled and available
+        if hasattr(self, 'detailed_thinking') and self.detailed_thinking:
+            # Check if model is an NVIDIA model with detailed_thinking capability
+            if hasattr(self.llm, 'client') and 'nvidia' in str(self.llm.__class__).lower():
+                # Prepend "detailed thinking on" to the system prompt if not already present
+                if "detailed thinking on" not in self.system_prompt.lower():
+                    self.system_prompt = f"detailed thinking on\n\n{self.system_prompt}"
+            
         try:
             return create_tool_calling_agent(self.llm, self.tools or [], prompt)
         except NotImplementedError as e:

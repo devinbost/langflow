@@ -52,6 +52,14 @@ class AgentComponent(ToolCallingAgentComponent):
             value="You are a helpful assistant that can use tools to answer questions and perform tasks.",
             advanced=False,
         ),
+        BoolInput(
+            name="detailed_thinking",
+            display_name="Detailed Thinking",
+            info="If true, the model will return a detailed thought process. Only supported by NVIDIA reasoning models.",
+            value=False,
+            advanced=True,
+            show=False,
+        ),
         *LCToolsAgentComponent._base_inputs,
         *memory_inputs,
         BoolInput(
@@ -92,13 +100,20 @@ class AgentComponent(ToolCallingAgentComponent):
                 raise ValueError(msg)
 
             # Set up and run agent
-            self.set(
-                llm=llm_model,
-                tools=self.tools,
-                chat_history=self.chat_history,
-                input_value=self.input_value,
-                system_prompt=self.system_prompt,
-            )
+            # Create base params for the agent
+            agent_params = {
+                "llm": llm_model,
+                "tools": self.tools,
+                "chat_history": self.chat_history,
+                "input_value": self.input_value,
+                "system_prompt": self.system_prompt,
+            }
+            
+            # Check if this is a NVIDIA model and add detailed_thinking if it exists
+            if hasattr(self, 'detailed_thinking'):
+                agent_params["detailed_thinking"] = self.detailed_thinking
+                
+            self.set(**agent_params)
             agent = self.create_agent_runnable()
             return await self.run_agent(agent)
 
@@ -145,6 +160,11 @@ class AgentComponent(ToolCallingAgentComponent):
 
     def _build_llm_model(self, component, inputs, prefix=""):
         model_kwargs = {input_.name: getattr(self, f"{prefix}{input_.name}") for input_ in inputs}
+        
+        # For NVIDIA models, add detailed_thinking if it exists
+        if self.agent_llm == "NVIDIA" and hasattr(self, "detailed_thinking"):
+            model_kwargs["detailed_thinking"] = self.detailed_thinking
+            
         return component.set(**model_kwargs).build_model()
 
     def set_component_params(self, component):
@@ -153,6 +173,10 @@ class AgentComponent(ToolCallingAgentComponent):
             inputs = provider_info.get("inputs")
             prefix = provider_info.get("prefix")
             model_kwargs = {input_.name: getattr(self, f"{prefix}{input_.name}") for input_ in inputs}
+            
+            # For NVIDIA models, add detailed_thinking if it exists
+            if self.agent_llm == "NVIDIA" and hasattr(self, "detailed_thinking"):
+                model_kwargs["detailed_thinking"] = self.detailed_thinking
 
             return component.set(**model_kwargs)
         return component
@@ -180,6 +204,17 @@ class AgentComponent(ToolCallingAgentComponent):
         if field_name in ("agent_llm",):
             build_config["agent_llm"]["value"] = field_value
             provider_info = MODEL_PROVIDERS_DICT.get(field_value)
+            
+            # Handle the detailed_thinking field visibility based on model provider
+            if "detailed_thinking" in build_config:
+                # Only show detailed_thinking for NVIDIA models
+                if field_value == "NVIDIA":
+                    build_config["detailed_thinking"]["show"] = True
+                else:
+                    # For other models, hide the detailed_thinking option and set to false
+                    build_config["detailed_thinking"]["show"] = False
+                    build_config["detailed_thinking"]["value"] = False
+            
             if provider_info:
                 component_class = provider_info.get("component_class")
                 if component_class and hasattr(component_class, "update_build_config"):
@@ -240,6 +275,7 @@ class AgentComponent(ToolCallingAgentComponent):
                 "input_value",
                 "add_current_date_tool",
                 "system_prompt",
+                "detailed_thinking",
                 "agent_description",
                 "max_iterations",
                 "handle_parsing_errors",
