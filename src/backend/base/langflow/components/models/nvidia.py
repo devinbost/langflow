@@ -25,11 +25,12 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
     Wrapper around a ChatNVIDIA model (or any BaseChatModel) 
     to clean its outputs from NVIDIA-specific duplications.
     """
-    actual_llm: BaseChatModel 
+    # actual_llm: BaseChatModel # REMOVED - Do not declare as a pydantic field
 
-    def __init__(self, llm: BaseChatModel, **kwargs: Any):
+    def __init__(self, llm: BaseChatModel, **kwargs: Any): # Added **kwargs
         # Pass kwargs to super to handle Pydantic model initialization if BaseChatModel expects it
         super().__init__(**kwargs) 
+        # Set actual_llm as a regular instance attribute, bypassing pydantic field validation
         object.__setattr__(self, "actual_llm", llm)
 
     def _generate(
@@ -39,14 +40,16 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        result: ChatResult = self.actual_llm._generate(
+        # Access the wrapped LLM instance attribute
+        actual_llm_instance = object.__getattribute__(self, 'actual_llm')
+        result: ChatResult = actual_llm_instance._generate(
             messages, stop=stop, run_manager=run_manager, **kwargs
         )
-        # Ensure result.generations is not None and is a list before iterating
         if result.generations and isinstance(result.generations, list):
             for gen_idx, gen_item in enumerate(result.generations):
-                # Standard ChatResult has List[ChatGeneration], ChatGeneration has .message
                 if isinstance(gen_item, Generation) and hasattr(gen_item, "message") and isinstance(gen_item.message, (AIMessage, AIMessageChunk)):
+                    # Assuming clean_nvidia_message_content modifies in-place or returns the modified object
+                    # And assuming the message object is mutable
                     result.generations[gen_idx].message = clean_nvidia_message_content(gen_item.message) # type: ignore
         return result
 
@@ -57,7 +60,8 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
         run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        result: ChatResult = await self.actual_llm._agenerate(
+        actual_llm_instance = object.__getattribute__(self, 'actual_llm')
+        result: ChatResult = await actual_llm_instance._agenerate(
             messages, stop=stop, run_manager=run_manager, **kwargs
         )
         if result.generations and isinstance(result.generations, list):
@@ -73,12 +77,14 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
-        original_iterator = self.actual_llm._stream(
+        actual_llm_instance = object.__getattribute__(self, 'actual_llm')
+        original_iterator = actual_llm_instance._stream(
             messages, stop=stop, run_manager=run_manager, **kwargs
         )
         for chunk in original_iterator:
-            # ChatGenerationChunk has .message which is an AIMessageChunk
             if hasattr(chunk, "message") and isinstance(chunk.message, AIMessageChunk):
+                # Assuming clean_nvidia_message_content modifies in-place or returns the modified object
+                # And assuming the message object is mutable
                 chunk.message = clean_nvidia_message_content(chunk.message) # type: ignore
             yield chunk
 
@@ -89,7 +95,8 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
         run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
-        original_iterator = self.actual_llm._astream(
+        actual_llm_instance = object.__getattribute__(self, 'actual_llm')
+        original_iterator = actual_llm_instance._astream(
             messages, stop=stop, run_manager=run_manager, **kwargs
         )
         async for chunk in original_iterator:
@@ -99,43 +106,69 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
             
     @property
     def _llm_type(self) -> str:
-        # Ensure actual_llm is initialized
-        if hasattr(self, 'actual_llm') and hasattr(self.actual_llm, '_llm_type'):
-            return self.actual_llm._llm_type + "_cleaned_nvidia_wrapper"
+        # Access the instance attribute safely
+        actual_llm_instance = object.__getattribute__(self, 'actual_llm')
+        if hasattr(actual_llm_instance, '_llm_type'):
+            return actual_llm_instance._llm_type + "_cleaned_nvidia_wrapper"
         return "nvidia_chat_model_cleaned_wrapper"
 
-
+    # Modified __getattr__
     def __getattr__(self, name: str) -> Any:
-        if name == 'actual_llm' or name.startswith('_'): # Avoid recursion and private attributes
-             raise AttributeError(f"Attribute {name} not found or is private.")
+        # Prevent recursion on the attribute we set manually
+        if name == 'actual_llm':
+             raise AttributeError("Attempted to getattr 'actual_llm' recursively.")
+        if name.startswith('__'): # Don't delegate magic/private methods unless intended
+             raise AttributeError(f"Attribute {name} is private or magic.")
+
+        # Delegate to the wrapped LLM using object.__getattribute__ to safely access self.actual_llm
         try:
-            # Ensure actual_llm is initialized before trying to access its attributes
-            if hasattr(self, 'actual_llm'):
-                return getattr(self.actual_llm, name)
-            raise AttributeError("Wrapped LLM 'actual_llm' not initialized.")
+             # Ensure actual_llm is initialized before trying to access its attributes
+             wrapped_llm = object.__getattribute__(self, 'actual_llm')
+             return getattr(wrapped_llm, name)
         except AttributeError:
-            raise AttributeError(
-                f"'{self.__class__.__name__}' (wrapping '{getattr(self, 'actual_llm', 'UninitializedLLM').__class__.__name__}') has no attribute '{name}'"
-            )
+             # Raise the final attribute error clearly stating the missing attribute
+             # Access self.actual_llm safely again for the error message
+             try:
+                 actual_llm_instance = object.__getattribute__(self, 'actual_llm')
+                 actual_llm_class_name = actual_llm_instance.__class__.__name__
+             except AttributeError:
+                 actual_llm_class_name = "UninitializedLLM"
+                 
+             raise AttributeError(
+                  f"'{self.__class__.__name__}' (or its wrapped '{actual_llm_class_name}') object has no attribute '{name}'"
+             ) from None # Suppress context
     
     # Delegate common properties required by Langchain
+    # These use standard attribute access (e.g. self.actual_llm), 
+    # which works fine once the attribute is set via object.__setattr__.
     @property
     def lc_serializable(self) -> bool:
-        if hasattr(self, 'actual_llm') and hasattr(self.actual_llm, 'lc_serializable'):
-            return self.actual_llm.lc_serializable
+        actual_llm_instance = object.__getattribute__(self, 'actual_llm')
+        if hasattr(actual_llm_instance, 'lc_serializable'):
+            return actual_llm_instance.lc_serializable
         return False 
 
     @property
     def InputType(self) -> Any: 
-        if hasattr(self, 'actual_llm') and hasattr(self.actual_llm, 'InputType'):
-            return self.actual_llm.InputType
-        return super().InputType # Fallback to BaseChatModel's default
+        actual_llm_instance = object.__getattribute__(self, 'actual_llm')
+        if hasattr(actual_llm_instance, 'InputType'):
+            return actual_llm_instance.InputType
+        # BaseChatModel might define this, so delegate to super if needed
+        try:
+            return super().InputType
+        except AttributeError:
+            # Handle case where neither defines it, maybe raise error or return default
+            return Any
 
     @property
     def OutputType(self) -> Any: 
-        if hasattr(self, 'actual_llm') and hasattr(self.actual_llm, 'OutputType'):
-            return self.actual_llm.OutputType
-        return super().OutputType # Fallback to BaseChatModel's default
+        actual_llm_instance = object.__getattribute__(self, 'actual_llm')
+        if hasattr(actual_llm_instance, 'OutputType'):
+            return actual_llm_instance.OutputType
+        try:
+            return super().OutputType
+        except AttributeError:
+            return Any
 
     # Ensure to define all abstract methods from BaseChatModel if any are not covered by delegation
     # For BaseChatModel, _generate, _agenerate are key. _stream, _astream have defaults that call them.
