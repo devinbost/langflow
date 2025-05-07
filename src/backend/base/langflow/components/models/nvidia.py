@@ -123,7 +123,7 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
         tools: Sequence[Union[Dict[str, Any], Type[BaseModel], Callable, BaseTool]],
         *args: Any, # Added *args
         **kwargs: Any,
-    ) -> Runnable[LanguageModelInput, BaseMessage]:
+    ) -> Any:  # Changed from Runnable[LanguageModelInput, BaseMessage] to avoid import errors
         """Delegates bind_tools call.""" # Simplified docstring
         # Delegate the call to the actual wrapped LLM instance
         actual_llm_instance = object.__getattribute__(self, 'actual_llm')
