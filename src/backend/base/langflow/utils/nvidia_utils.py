@@ -120,3 +120,27 @@ def clean_nvidia_message_content(message: Union[AIMessage, AIMessageChunk]) -> U
         message.content = _deduplicate_if_doubled(message.content)
 
     return message
+
+def _validate_and_clean_message_content(msg_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensures message content is non-empty for NVIDIA API compatibility."""
+    cleaned_msg = msg_dict.copy()
+    msg_type = cleaned_msg.get('role', 'unknown')
+    content = cleaned_msg.get('content')
+
+    # Check for empty or None content
+    if content is None or content == "":
+        # Do not modify if tool calls/function calls are present, as content=None is valid then
+        if cleaned_msg.get("tool_calls") or cleaned_msg.get("function_call"):
+             # Ensure content is explicitly None in this case for clarity, not empty string
+             cleaned_msg['content'] = None 
+        else:
+            # If no tool/function call, content MUST be non-empty
+            placeholder = f"[Internal Note: Empty '{msg_type}' message content replaced]"
+            logger.warning(f"NVIDIA API Request: Empty content found in '{msg_type}' message. Replacing with placeholder: '{placeholder}'")
+            cleaned_msg['content'] = placeholder
+            
+    # Also ensure content=None is used if only tool_calls are present, not content=""
+    elif cleaned_msg.get("tool_calls") and content == "":
+         cleaned_msg['content'] = None
+
+    return cleaned_msg

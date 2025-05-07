@@ -16,8 +16,8 @@ from langchain_core.callbacks import (
     AsyncCallbackManagerForLLMRun,
     CallbackManagerForLLMRun,
 )
-from langchain_core.messages import BaseMessage, AIMessage, AIMessageChunk
-from langflow.utils.nvidia_utils import clean_nvidia_message_content
+from langchain_core.messages import BaseMessage, AIMessage, AIMessageChunk, message_to_dict, messages_from_dict
+from langflow.utils.nvidia_utils import clean_nvidia_message_content, _validate_and_clean_message_content
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 
@@ -42,10 +42,21 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        # Access the wrapped LLM instance attribute
+        # Clean messages BEFORE sending to the underlying model
+        message_dicts = [message_to_dict(m) for m in messages]
+        cleaned_message_dicts = [_validate_and_clean_message_content(m) for m in message_dicts]
+        
+        # Recreate BaseMessage objects if the underlying model expects them
+        # NOTE: This assumes ChatNVIDIA._generate takes List[BaseMessage]
+        # If it takes List[Dict], we can pass cleaned_message_dicts directly.
+        # Checking ChatNVIDIA source, it seems to convert messages to dicts internally anyway,
+        # but its internal _generate might expect List[BaseMessage]. Let's stick to List[BaseMessage].
+        # Need message_from_dict utility.
+        cleaned_messages = messages_from_dict(cleaned_message_dicts)
+        
         actual_llm_instance = object.__getattribute__(self, 'actual_llm')
         result: ChatResult = actual_llm_instance._generate(
-            messages, stop=stop, run_manager=run_manager, **kwargs
+            cleaned_messages, stop=stop, run_manager=run_manager, **kwargs
         )
         if result.generations and isinstance(result.generations, list):
             for gen_idx, gen_item in enumerate(result.generations):
@@ -62,9 +73,15 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
         run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
+        # Clean messages BEFORE sending
+        message_dicts = [message_to_dict(m) for m in messages]
+        cleaned_message_dicts = [_validate_and_clean_message_content(m) for m in message_dicts]
+        from langchain_core.messages import messages_from_dict
+        cleaned_messages = messages_from_dict(cleaned_message_dicts)
+        
         actual_llm_instance = object.__getattribute__(self, 'actual_llm')
         result: ChatResult = await actual_llm_instance._agenerate(
-            messages, stop=stop, run_manager=run_manager, **kwargs
+            cleaned_messages, stop=stop, run_manager=run_manager, **kwargs
         )
         if result.generations and isinstance(result.generations, list):
             for gen_idx, gen_item in enumerate(result.generations):
@@ -79,9 +96,15 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
+        # Clean messages BEFORE sending
+        message_dicts = [message_to_dict(m) for m in messages]
+        cleaned_message_dicts = [_validate_and_clean_message_content(m) for m in message_dicts]
+        from langchain_core.messages import messages_from_dict
+        cleaned_messages = messages_from_dict(cleaned_message_dicts)
+        
         actual_llm_instance = object.__getattribute__(self, 'actual_llm')
         original_iterator = actual_llm_instance._stream(
-            messages, stop=stop, run_manager=run_manager, **kwargs
+            cleaned_messages, stop=stop, run_manager=run_manager, **kwargs
         )
         for chunk in original_iterator:
             if hasattr(chunk, "message") and isinstance(chunk.message, AIMessageChunk):
@@ -97,9 +120,15 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
         run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
+        # Clean messages BEFORE sending
+        message_dicts = [message_to_dict(m) for m in messages]
+        cleaned_message_dicts = [_validate_and_clean_message_content(m) for m in message_dicts]
+        from langchain_core.messages import messages_from_dict
+        cleaned_messages = messages_from_dict(cleaned_message_dicts)
+        
         actual_llm_instance = object.__getattribute__(self, 'actual_llm')
         original_iterator = actual_llm_instance._astream(
-            messages, stop=stop, run_manager=run_manager, **kwargs
+            cleaned_messages, stop=stop, run_manager=run_manager, **kwargs
         )
         async for chunk in original_iterator:
             if hasattr(chunk, "message") and isinstance(chunk.message, AIMessageChunk):
