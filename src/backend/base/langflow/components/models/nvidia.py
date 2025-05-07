@@ -1,6 +1,7 @@
 from typing import Any, Iterator, AsyncIterator, List, Optional
 
 from loguru import logger
+from pydantic.v1 import SecretStr
 from requests.exceptions import ConnectionError  # noqa: A004
 from urllib3.exceptions import MaxRetryError, NameResolutionError
 
@@ -10,12 +11,12 @@ from langflow.field_typing.range_spec import RangeSpec
 from langflow.inputs import BoolInput, DropdownInput, IntInput, MessageTextInput, SecretStrInput, SliderInput
 from langflow.schema.dotdict import dotdict
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.outputs import ChatResult, ChatGenerationChunk
+from langchain_core.outputs import ChatResult, ChatGenerationChunk, Generation
 from langchain_core.callbacks import (
     AsyncCallbackManagerForLLMRun,
     CallbackManagerForLLMRun,
 )
-from langchain_core.messages import BaseMessage, AIMessage
+from langchain_core.messages import BaseMessage, AIMessage, AIMessageChunk
 from langflow.utils.nvidia_utils import clean_nvidia_message_content
 
 
@@ -262,7 +263,7 @@ class NVIDIAModelComponent(LCModelComponent):
 
         return build_config
 
-    def build_model(self) -> BaseLanguageModel:  # type: ignore[type-var]
+    def build_model(self) -> LanguageModel:  # type: ignore[type-var]
         try:
             from langchain_nvidia_ai_endpoints import ChatNVIDIA
             # from langchain_nvidia_ai_endpoints._common import _NVIDIAClient # Not needed directly here

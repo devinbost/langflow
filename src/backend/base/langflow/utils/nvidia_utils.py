@@ -10,10 +10,10 @@ from langflow.field_typing.langchain_types import ToolCall # For AIMessage.tool_
 logger = logging.getLogger(__name__)
 
 def _deduplicate_if_doubled(s: Optional[str]) -> Optional[str]:
-    \"\"\"
+    """
     If a string 's' is a simple concatenation of two identical halves,
     returns the first half. Otherwise, returns the original string.
-    \"\"\"
+    """
     if not s or len(s) < 2:
         return s
     half_len = len(s) // 2
@@ -23,7 +23,7 @@ def _deduplicate_if_doubled(s: Optional[str]) -> Optional[str]:
     return s
 
 def _clean_tool_call_chunk_dict(tc_chunk_dict: Dict[str, Any]) -> Dict[str, Any]:
-    \"\"\"Cleans name, args, and id within a single tool_call_chunk dictionary.\"\"\"
+    """Cleans name, args, and id within a single tool_call_chunk dictionary."""
     cleaned_chunk = tc_chunk_dict.copy()
     if "name" in cleaned_chunk and isinstance(cleaned_chunk["name"], str):
         cleaned_chunk["name"] = _deduplicate_if_doubled(cleaned_chunk["name"])
@@ -33,7 +33,7 @@ def _clean_tool_call_chunk_dict(tc_chunk_dict: Dict[str, Any]) -> Dict[str, Any]
     raw_args_str = cleaned_chunk.get("args")
     if isinstance(raw_args_str, str) and raw_args_str:
         args_half_len = len(raw_args_str) // 2
-        is_perfect_double = len(raw_args_str) % 2 == 0 and raw_args_str[:args_half_len] == raw_args_str[half_len:]
+        is_perfect_double = len(raw_args_str) % 2 == 0 and raw_args_str[:args_half_len] == raw_args_str[args_half_len:]
         if is_perfect_double:
             try:
                 json.loads(raw_args_str[:args_half_len]) 
@@ -46,7 +46,7 @@ def _clean_tool_call_chunk_dict(tc_chunk_dict: Dict[str, Any]) -> Dict[str, Any]
     return cleaned_chunk
 
 def _clean_tool_call_model_dict(tc_model_dict: Dict[str, Any]) -> Dict[str, Any]:
-    \"\"\"Cleans name and id for a ToolCall that is represented as a dictionary.\"\"\"
+    """Cleans name and id for a ToolCall that is represented as a dictionary."""
     # This is used if AIMessage.tool_calls are dicts instead of Pydantic models directly
     cleaned_tc = tc_model_dict.copy()
     if "name" in cleaned_tc and isinstance(cleaned_tc["name"], str):
@@ -57,11 +57,11 @@ def _clean_tool_call_model_dict(tc_model_dict: Dict[str, Any]) -> Dict[str, Any]
     return cleaned_tc
 
 def clean_nvidia_message_content(message: Union[AIMessage, AIMessageChunk]) -> Union[AIMessage, AIMessageChunk]:
-    \"\"\"
+    """
     Cleans AIMessage or AIMessageChunk from NVIDIA model outputs
     by de-duplicating tool call name, args, id, and response_metadata fields.
     Modifies the message object in-place if mutable, or returns a modified copy.
-    \"\"\"
+    """
     if not isinstance(message, (AIMessage, AIMessageChunk)):
         # logger.warning(f"Attempted to clean non-AIMessage(Chunk) type: {type(message)}")
         return message
@@ -117,4 +117,4 @@ def clean_nvidia_message_content(message: Union[AIMessage, AIMessageChunk]) -> U
         # For now, applying the simple doubler. If issues arise, this could be removed for 'content'.
         message.content = _deduplicate_if_doubled(message.content)
 
-    return message 
+    return message
