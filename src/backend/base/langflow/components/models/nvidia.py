@@ -1,7 +1,7 @@
-from typing import Any, Iterator, AsyncIterator, List, Optional
+from typing import Any, Iterator, AsyncIterator, List, Optional, Sequence, Union, Callable, Dict, Type
 
 from loguru import logger
-from pydantic.v1 import SecretStr
+from pydantic.v1 import SecretStr, BaseModel
 from requests.exceptions import ConnectionError  # noqa: A004
 from urllib3.exceptions import MaxRetryError, NameResolutionError
 
@@ -18,6 +18,8 @@ from langchain_core.callbacks import (
 )
 from langchain_core.messages import BaseMessage, AIMessage, AIMessageChunk
 from langflow.utils.nvidia_utils import clean_nvidia_message_content
+from langchain_core.runnables import Runnable
+from langchain_core.tools import BaseTool
 
 
 class NvidiaChatModelOutputWrapper(BaseChatModel):
@@ -111,6 +113,29 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
         if hasattr(actual_llm_instance, '_llm_type'):
             return actual_llm_instance._llm_type + "_cleaned_nvidia_wrapper"
         return "nvidia_chat_model_cleaned_wrapper"
+
+    # ADD this method explicitly:
+    def bind_tools(
+        self,
+        tools: Sequence[Union[Dict[str, Any], Type[BaseModel], Callable, BaseTool]],
+        *args: Any, # Added *args
+        **kwargs: Any,
+    ) -> Runnable[LanguageModelInput, BaseMessage]:
+        \"\"\"Binds tools to the underlying LLM and returns the bound runnable.\"\"\"
+        # Delegate the call to the actual wrapped LLM instance
+        actual_llm_instance = object.__getattribute__(self, 'actual_llm')
+        
+        # Call the actual bind_tools method
+        # Assuming actual_llm_instance has the method. If not, __getattr__ would have failed earlier.
+        bound_llm_runnable = actual_llm_instance.bind_tools(tools, *args, **kwargs)
+        
+        # Return the result from the underlying bind_tools call.
+        # This runnable should internally use the llm instance that was bound.
+        # If the agent execution uses the *original* wrapper instance for generation, 
+        # the cleaning will still happen. If it uses the runnable returned here 
+        # *directly* for generation in a way that bypasses the wrapper's generation methods,
+        # we might need to wrap `bound_llm_runnable` itself, but let's try this first.
+        return bound_llm_runnable
 
     # Modified __getattr__
     def __getattr__(self, name: str) -> Any:
