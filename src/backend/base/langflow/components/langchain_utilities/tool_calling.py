@@ -118,9 +118,16 @@ class ToolCallingAgentComponent(LCToolsAgentComponent):
             # Check if model is a NVIDIA model (either directly or via client attribute)
             is_nvidia_model = False
             try:
-                is_nvidia_model = 'nvidia' in str(self.llm.__class__).lower()
-            except:
-                pass
+                # Check based on class name or potential client attribute more robustly
+                llm_class_name_lower = str(self.llm.__class__).lower()
+                is_nvidia_model = 'nvidia' in llm_class_name_lower
+                # Add check for wrapper if it indicates underlying type
+                if not is_nvidia_model and hasattr(self.llm, 'actual_llm'):
+                    llm_class_name_lower = str(self.llm.actual_llm.__class__).lower()
+                    is_nvidia_model = 'nvidia' in llm_class_name_lower
+
+            except Exception as e_check:
+                logger.warning(f"Could not reliably determine if model is NVIDIA: {e_check}")
             
             logger.info(f"Model class: {self.llm.__class__.__name__}, has_detailed_thinking: {has_detailed_thinking}, is_nvidia_model: {is_nvidia_model}")
             
@@ -140,76 +147,96 @@ class ToolCallingAgentComponent(LCToolsAgentComponent):
             # For NVIDIA models, add special handling for tools
             is_nvidia_model = False
             try:
-                is_nvidia_model = 'nvidia' in str(self.llm.__class__).lower()
-            except:
-                pass
-                
+                # Check based on class name or potential client attribute more robustly
+                llm_class_name_lower = str(self.llm.__class__).lower()
+                is_nvidia_model = 'nvidia' in llm_class_name_lower
+                # Add check for wrapper if it indicates underlying type
+                if not is_nvidia_model and hasattr(self.llm, 'actual_llm'):
+                    llm_class_name_lower = str(self.llm.actual_llm.__class__).lower()
+                    is_nvidia_model = 'nvidia' in llm_class_name_lower
+
+            except Exception as e_check:
+                logger.warning(f"Could not reliably determine if model is NVIDIA: {e_check}")
+
             if is_nvidia_model:
-                # Make sure we have valid tools with proper structure for NVIDIA
+                logger.info("Applying NVIDIA specific tool handling.")
                 tools_copy = []
-                for tool in (self.tools or []):
-                    # Ensure tool has proper structure
-                    if hasattr(tool, 'to_openai_tool'):
-                        # Already has OpenAI tool format
-                        tools_copy.append(tool)
+                for tool_obj in (self.tools or []):
+                    if hasattr(tool_obj, 'to_openai_tool'):
+                        tools_copy.append(tool_obj)
                     else:
-                        # Convert to proper format
-                        from langchain.tools import StructuredTool
                         try:
-                            # Get the tool's original name
-                            original_tool_name = getattr(tool, 'name', 'unknown')
+                            original_tool_name = getattr(tool_obj, 'name', 'unknown')
+                            logger.info(f"Tool info - class: {tool_obj.__class__.__name__}, name before NVIDIA fix: {original_tool_name}")
+
+                            # --- MODIFIED FIX LOGIC ---
+                            if original_tool_name == "evaluate_expression":
+                                tool_name = "calculate"
+                                logger.info(f"Forcing tool name 'evaluate_expression' to 'calculate' for NVIDIA agent.")
+                            elif original_tool_name == "evaluate_expressionevaluate_expression":
+                                tool_name = "calculate"
+                                logger.info(f"Fixing duplicated tool name '{original_tool_name}' to 'calculate' for NVIDIA agent.")
+                            else:
+                                # Apply generic duplication fix if needed
+                                if original_tool_name and len(original_tool_name) >= 6:
+                                     half_len = len(original_tool_name) // 2
+                                     first_half = original_tool_name[:half_len]
+                                     second_half = original_tool_name[half_len:]
+                                     if first_half == second_half:
+                                         logger.warning(f"Fixing generic duplicated name: {original_tool_name} -> {first_half}")
+                                         tool_name = first_half
+                                     else:
+                                         tool_name = original_tool_name
+                                else:
+                                    tool_name = original_tool_name
+                            # --- END MODIFIED FIX LOGIC ---
+
+                            logger.info(f"Final tool name for NVIDIA agent schema: {tool_name}")
                             
-                            # Log tool information for debugging
-                            logger.info(f"Tool info - class: {tool.__class__.__name__}, name: {original_tool_name}")
+                            # Extract description safely
+                            tool_description = getattr(tool_obj, 'description', 'No description available')
+                            if not isinstance(tool_description, str):
+                                tool_description = str(tool_description) # Ensure string
                             
-                            # Simple function to detect and fix duplicated tool names
-                            def fix_duplicated_tool_name(name):
-                                # Special case for the evaluate_expression tool (Calculator)
-                                if name == "evaluate_expressionevaluate_expression":
-                                    return "calculate"
-                                
-                                # Check for exact duplication (somethingsomething)
-                                if name and len(name) >= 6:
-                                    half_len = len(name) // 2
-                                    first_half = name[:half_len]
-                                    second_half = name[half_len:]
-                                    
-                                    if first_half == second_half:
-                                        logger.warning(f"Found exact duplicated tool name: {name} -> {first_half}")
-                                        logger.info(f"This may be a symptom of a mismatch between method name and tool_name")
-                                        return first_half
-                                
-                                # No duplication detected
-                                return name
-                            
-                            # Apply name validation
-                            tool_name = fix_duplicated_tool_name(original_tool_name)
-                            if tool_name != original_tool_name:
-                                logger.info(f"Fixed duplicated tool name: {original_tool_name} -> {tool_name}")
-                                logger.warning("This is a workaround for a known issue with duplicated tool names. The root cause may have been fixed.")
-                            
-                            # Create a properly structured tool
+                            # Extract run function safely
+                            # Needs the actual execution logic. tool_obj.run might be correct,
+                            # but ensure it exists and is callable.
+                            run_func = getattr(tool_obj, 'run', None)
+                            if not callable(run_func):
+                                logger.error(f"Tool object {original_tool_name} does not have a callable 'run' method.")
+                                # Decide whether to skip or raise. Skipping for now.
+                                continue 
+
+                            # Extract args_schema safely
+                            args_schema = getattr(tool_obj, 'args_schema', None)
+
                             structured_tool = StructuredTool.from_function(
-                                func=tool.run,
-                                name=tool_name,
-                                description=tool.description,
-                                return_direct=False,
-                                args_schema=None,
-                                coroutine=None,
-                                verbose=True,
+                                func=run_func, # Use the validated run function
+                                name=tool_name, # Use the definitively corrected name
+                                description=tool_description,
+                                return_direct=getattr(tool_obj, 'return_direct', False),
+                                args_schema=args_schema, # Pass the schema if it exists
+                                # coroutine=... # Add if async support is needed/available
+                                # verbose=... # Add if needed
                             )
                             tools_copy.append(structured_tool)
-                            logger.info(f"Converted tool {tool.name} to StructuredTool for NVIDIA compatibility")
+                            logger.info(f"Processed tool {original_tool_name} -> {tool_name} for NVIDIA compatibility")
                         except Exception as tool_e:
-                            logger.warning(f"Could not convert tool {tool.name}: {tool_e}")
-                            tools_copy.append(tool)
+                            logger.warning(f"Could not process tool {getattr(tool_obj, 'name', 'unknown')}: {tool_e}", exc_info=True)
+                            # Optionally append the original tool if processing fails, or skip
+                            # tools_copy.append(tool_obj)
                 
                 logger.info(f"Creating NVIDIA tool calling agent with {len(tools_copy)} tools")
                 return create_tool_calling_agent(self.llm, tools_copy, prompt)
             else:
                 # Standard handling for non-NVIDIA models
+                logger.info(f"Creating standard tool calling agent with {len(self.tools or [])} tools")
                 return create_tool_calling_agent(self.llm, self.tools or [], prompt)
                 
         except NotImplementedError as e:
             message = f"{self.display_name} does not support tool calling. Please try using a compatible model."
+            logger.error(message, exc_info=True)
             raise NotImplementedError(message) from e
+        except Exception as e_main:
+             logger.error(f"Failed to create agent runnable: {e_main}", exc_info=True)
+             raise
