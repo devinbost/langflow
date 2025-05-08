@@ -227,8 +227,22 @@ class ComponentToolkit:
             else:
                 args_schema = create_input_schema(self.component.inputs)
 
-            name = f"{output.method}".strip(".")
+            # Use tool_name from Output if available (preferred approach)
+            # Output has a dedicated tool_name field that should be used when provided
+            name = None
+            if hasattr(output, "tool_name") and getattr(output, "tool_name"):
+                name = getattr(output, "tool_name")
+                from langflow.logging import logger
+                logger.info(f"Using explicit tool_name: {name} from output definition")
+            else:
+                # Fallback to method name if tool_name isn't specified
+                name = f"{output.method}".strip(".")
+                
             formatted_name = _format_tool_name(name)
+            
+            # Log the tool name for debugging
+            from langflow.logging import logger
+            logger.info(f"Creating tool with name: {name} -> {formatted_name} (method: {output.method})")
             event_manager = self.component._event_manager
             if asyncio.iscoroutinefunction(output_method):
                 tools.append(
@@ -299,30 +313,44 @@ class ComponentToolkit:
         self,
         tools: list[BaseTool | StructuredTool],
     ) -> list[BaseTool]:
-        # update the tool_name and description according to the name and secriotion mentioned in the list
-        if isinstance(self.metadata, pd.DataFrame):
+        # Update the tool description and filter by status based on metadata
+        if isinstance(self.metadata, pd.DataFrame) and not self.metadata.empty:
             metadata_dict = self.get_tools_metadata_dictionary()
             filtered_tools = []
             for tool in tools:
-                if isinstance(tool, StructuredTool | BaseTool) and tool.tags:
+                # Ensure it's a tool type we can process and has tags
+                if isinstance(tool, StructuredTool | BaseTool) and getattr(tool, 'tags', None):
                     try:
-                        tag = tool.tags[0]
+                        tag = tool.tags[0] # Use first tag for matching
                     except IndexError:
-                        msg = "Tool tags cannot be empty."
-                        raise ValueError(msg) from None
+                        logger.warning(f"Tool {getattr(tool, 'name', 'Unknown')} has empty tags list, cannot match metadata.")
+                        filtered_tools.append(tool) # Keep tool with bad tags
+                        continue
+
                     if tag in metadata_dict:
                         tool_metadata = metadata_dict[tag]
-                        # Only include tools with status=True
+                        # Only include tools with status=True (or default to True if status not present)
                         if tool_metadata.get("status", True):
-                            tool.name = tool_metadata.get("name", tool.name)
+                            # Update description only
                             tool.description = tool_metadata.get("description", tool.description)
                             if tool_metadata.get("commands"):
                                 tool.description = _add_commands_to_tool_description(
                                     tool.description, tool_metadata.get("commands")
                                 )
                             filtered_tools.append(tool)
+                        # else: tool is disabled by metadata, so it's implicitly skipped
+                    else:
+                         # If tag not in metadata, assume enabled and keep original name/desc
+                         filtered_tools.append(tool)
+                elif isinstance(tool, StructuredTool | BaseTool):
+                     # Tool has no tags, keep it but cannot apply metadata
+                     logger.warning(f"Tool {getattr(tool, 'name', 'Unknown')} has no tags, cannot match metadata.")
+                     filtered_tools.append(tool)
                 else:
-                    msg = f"Expected a StructuredTool or BaseTool, got {type(tool)}"
-                    raise TypeError(msg)
+                    # Should not happen if input list is correct type
+                    logger.error(f"Unexpected item in tools list: {type(tool)}")
+                    # Optionally skip or include depending on desired strictness
+                    # filtered_tools.append(tool) 
             return filtered_tools
+        # If no metadata dataframe or it's empty, return original tools
         return tools

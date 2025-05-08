@@ -158,8 +158,17 @@ class Data(BaseModel):
         if not all(key in self.data for key in ["text", "sender"]):
             msg = f"Missing required keys ('text', 'sender') in Data: {self.data}"
             raise ValueError(msg)
+            
         sender = self.data.get("sender", MESSAGE_SENDER_AI)
         text = self.data.get("text", "")
+        
+        # Validate that text is not empty
+        if not text or (isinstance(text, str) and not text.strip()):
+            msg = f"Message content cannot be empty: {self.data}"
+            logger.warning(msg)
+            # Use a placeholder if content is empty
+            text = "[Empty message content]"
+            
         files = self.data.get("files", [])
         if sender == MESSAGE_SENDER_USER:
             if files:

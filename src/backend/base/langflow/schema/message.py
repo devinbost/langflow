@@ -128,25 +128,49 @@ class Message(Data):
         Returns:
             BaseMessage: The converted BaseMessage.
         """
-        # The idea of this function is to be a helper to convert a Data to a BaseMessage
-        # It will use the "sender" key to determine if the message is Human or AI
-        # If the key is not present, it will default to AI
-        # But first we check if all required keys are present in the data dictionary
-        # they are: "text", "sender"
-        if self.text is None or not self.sender:
-            logger.warning("Missing required keys ('text', 'sender') in Message, defaulting to HumanMessage.")
-        text = "" if not isinstance(self.text, str) else self.text
+        if self.text is None and self.sender is None:
+            logger.warning("Message with None text and sender, defaulting to empty HumanMessage.")
+            return HumanMessage(content="") # Or handle as an error depending on policy
 
-        if self.sender == MESSAGE_SENDER_USER or not self.sender:
+        original_text_is_stream = isinstance(self.text, (AsyncIterator, Iterator))
+        
+        # Initialize current_content based on whether self.text is a stream or not
+        if original_text_is_stream:
+            current_content = ""  # For streams, initial content is empty
+        elif self.text is None:
+            current_content = ""  # If text is None, treat as empty string
+        else:
+            current_content = str(self.text) # Ensure it's a string if not None or stream
+
+        # Add placeholder only if the original text (not a stream) was effectively empty
+        if not original_text_is_stream and not current_content.strip():
+            # Log the original self.text to understand why placeholder is added
+            logger.warning(
+                f"Message content was effectively empty (original text: '{self.text}'). Using placeholder."
+            )
+            current_content = "[Empty message content]"
+
+        sender = self.sender or MESSAGE_SENDER_USER # Default to User if sender is None
+
+        if sender == MESSAGE_SENDER_USER:
             if self.files:
-                contents = [{"type": "text", "text": text}]
-                contents.extend(self.get_file_content_dicts())
-                human_message = HumanMessage(content=contents)
+                # Build multimodal content list
+                multi_modal_content = []
+                # Add text part first, only if it's not just the placeholder and actually has substance,
+                # or if it's the placeholder but there are no files (to ensure some content).
+                if current_content != "[Empty message content]" or not self.files:
+                    multi_modal_content.append({"type": "text", "text": current_content})
+                
+                multi_modal_content.extend(self.get_file_content_dicts())
+                # If after adding files, multi_modal_content is empty (e.g. placeholder text and no valid files)
+                # ensure there's at least an empty text part for HumanMessage.
+                if not multi_modal_content:
+                    multi_modal_content.append({"type": "text", "text": ""})
+                return HumanMessage(content=multi_modal_content)
             else:
-                human_message = HumanMessage(content=text)
-            return human_message
-
-        return AIMessage(content=text)
+                return HumanMessage(content=current_content)
+        # For AI or other sender types (assuming they don't use multimodal content in this specific way)
+        return AIMessage(content=current_content)
 
     @classmethod
     def from_lc_message(cls, lc_message: BaseMessage) -> Message:

@@ -1,9 +1,11 @@
 from langchain.agents import create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.tools import StructuredTool
 
 from langflow.base.agents.agent import LCToolsAgentComponent
 from langflow.inputs import MessageTextInput
 from langflow.inputs.inputs import DataInput, HandleInput
+from langflow.logging import logger
 from langflow.schema import Data
 
 
@@ -41,16 +43,218 @@ class ToolCallingAgentComponent(LCToolsAgentComponent):
         return self.chat_history
 
     def create_agent_runnable(self):
+        # Debug log for diagnostic purposes
+        logger.info(f"Creating agent runnable with system_prompt: {getattr(self, 'system_prompt', 'NOT SET')}")
+        logger.info(f"Creating agent runnable with input_value: {getattr(self, 'input_value', 'NOT SET')}")
+        
+        # Force system_prompt to have content - be more aggressive in setting defaults
+        if not hasattr(self, 'system_prompt') or not self.system_prompt or not str(self.system_prompt).strip():
+            system_prompt_default = "You are a helpful assistant that can use tools to answer questions and perform tasks."
+            logger.warning(f"System prompt was empty or missing, using default: '{system_prompt_default}'")
+            self.system_prompt = system_prompt_default
+            
+        # Force input_value to have content - be more aggressive in setting defaults
+        if not hasattr(self, 'input_value') or not self.input_value or not str(self.input_value).strip():
+            input_value_default = "What can you help me with?"
+            logger.warning(f"Input value was empty or missing, using default: '{input_value_default}'")
+            self.input_value = input_value_default
+        
+        # Log the actual data being used
+        logger.info(f"Using system_prompt: '{self.system_prompt[:50]}...'")
+        logger.info(f"Using input_value: '{self.input_value[:50]}...'")
+        
+        # Define custom message formatter with strict validation
+        def validate_and_format_message(message_type, template_content):
+            if message_type == "system":
+                if hasattr(self, 'system_prompt') and self.system_prompt and str(self.system_prompt).strip():
+                    return ("system", self.system_prompt)
+                else:
+                    default = "You are a helpful assistant that can use tools to answer questions and perform tasks."
+                    logger.warning(f"System prompt invalid in formatter, using default: '{default}'")
+                    return ("system", default)
+            elif message_type == "human":
+                if hasattr(self, 'input_value') and self.input_value and str(self.input_value).strip():
+                    return ("human", "{input}")
+                else:
+                    logger.warning("Input value invalid in formatter, using default template")
+                    return ("human", "What can you help me with?")
+            else:
+                if template_content and str(template_content).strip():
+                    return (message_type, template_content)
+                else:
+                    logger.warning(f"Empty {message_type} message content, using placeholder")
+                    return (message_type, f"[Empty {message_type} message]")
+                
+        # Create message template with validated content
+        # For NVIDIA models, we need to ensure all placeholder messages have default content
+        # to prevent empty string validation errors
+        is_nvidia_model = (hasattr(self.llm, 'client') and 'nvidia' in str(self.llm.__class__).lower()) or 'nvidia' in str(self.llm.__class__).lower()
+        
+        # Always use the same standard template structure to avoid prompt variable issues
         messages = [
-            ("system", "{system_prompt}"),
+            validate_and_format_message("system", "{system_prompt}"),
             ("placeholder", "{chat_history}"),
-            ("human", "{input}"),
+            validate_and_format_message("human", "{input}"),
             ("placeholder", "{agent_scratchpad}"),
         ]
+        
+        # Log template choice
+        logger.info("Using standard message template structure")
+        
+        # Log the message structure for debugging
+        logger.info(f"Message template structure: {messages}")
+        
         prompt = ChatPromptTemplate.from_messages(messages)
         self.validate_tool_names()
+
+        # Add detailed_thinking to system prompt if it's enabled and available
         try:
-            return create_tool_calling_agent(self.llm, self.tools or [], prompt)
+            # Check if detailed_thinking is set as a valid boolean and is True
+            has_detailed_thinking = (
+                hasattr(self, 'detailed_thinking') and 
+                isinstance(self.detailed_thinking, bool) and 
+                self.detailed_thinking
+            )
+            
+            # Check if model is a NVIDIA model (either directly or via client attribute)
+            is_nvidia_model = False
+            try:
+                # Check based on class name or potential client attribute more robustly
+                llm_class_name_lower = str(self.llm.__class__).lower()
+                is_nvidia_model = 'nvidia' in llm_class_name_lower
+                # Add check for wrapper if it indicates underlying type
+                if not is_nvidia_model and hasattr(self.llm, 'actual_llm'):
+                    llm_class_name_lower = str(self.llm.actual_llm.__class__).lower()
+                    is_nvidia_model = 'nvidia' in llm_class_name_lower
+
+            except Exception as e_check:
+                logger.warning(f"Could not reliably determine if model is NVIDIA: {e_check}")
+            
+            logger.info(f"Model class: {self.llm.__class__.__name__}, has_detailed_thinking: {has_detailed_thinking}, is_nvidia_model: {is_nvidia_model}")
+            
+            # Modify system prompt for NVIDIA models with detailed_thinking enabled
+            if has_detailed_thinking and is_nvidia_model:
+                # Prepend "detailed thinking on" to the system prompt if not already present
+                if "detailed thinking on" not in self.system_prompt.lower():
+                    original_prompt = self.system_prompt
+                    self.system_prompt = f"detailed thinking on\n\n{original_prompt}"
+                    logger.info(f"Added 'detailed thinking on' to system prompt for NVIDIA model. Original: '{original_prompt[:50]}...'")
+        except Exception as e:
+            # Log error but continue without modifying the prompt
+            logger.error(f"Error processing detailed_thinking parameter: {e}")
+            # Don't propagate the exception to avoid breaking the agent
+            
+        try:
+            # For NVIDIA models, add special handling for tools
+            is_nvidia_model = False
+            try:
+                # Check based on class name or potential client attribute more robustly
+                llm_class_name_lower = str(self.llm.__class__).lower()
+                is_nvidia_model = 'nvidia' in llm_class_name_lower
+                # Add check for wrapper if it indicates underlying type
+                if not is_nvidia_model and hasattr(self.llm, 'actual_llm'):
+                    llm_class_name_lower = str(self.llm.actual_llm.__class__).lower()
+                    is_nvidia_model = 'nvidia' in llm_class_name_lower
+
+            except Exception as e_check:
+                logger.warning(f"Could not reliably determine if model is NVIDIA: {e_check}")
+
+            tools_to_pass = self.tools or [] # Default to self.tools or an empty list
+
+            if is_nvidia_model:
+                logger.info("Applying NVIDIA specific tool handling.")
+                processed_nvidia_tools = []
+                for tool_obj in (self.tools or []): # Iterate over original self.tools
+                    if hasattr(tool_obj, 'to_openai_tool'): # Check if it's already OpenAI-compatible (less likely for NVIDIA custom path)
+                        processed_nvidia_tools.append(tool_obj)
+                    else:
+                        try:
+                            original_tool_name = getattr(tool_obj, 'name', 'unknown')
+                            # logger.info(f"Tool info - class: {tool_obj.__class__.__name__}, name before NVIDIA fix: {original_tool_name}")
+
+                            # --- MODIFIED FIX LOGIC ---
+                            if original_tool_name == "evaluate_expression":
+                                tool_name = "calculate"
+                                # logger.info(f"Forcing tool name 'evaluate_expression' to 'calculate' for NVIDIA agent.")
+                            elif original_tool_name == "evaluate_expressionevaluate_expression":
+                                tool_name = "calculate"
+                                # logger.info(f"Fixing duplicated tool name '{original_tool_name}' to 'calculate' for NVIDIA agent.")
+                            else:
+                                # Apply generic duplication fix if needed
+                                if original_tool_name and len(original_tool_name) >= 6:
+                                     half_len = len(original_tool_name) // 2
+                                     first_half = original_tool_name[:half_len]
+                                     second_half = original_tool_name[half_len:]
+                                     if first_half == second_half:
+                                         # logger.warning(f"Fixing generic duplicated name: {original_tool_name} -> {first_half}")
+                                         tool_name = first_half
+                                     else:
+                                         tool_name = original_tool_name
+                                else:
+                                    tool_name = original_tool_name
+                            # --- END MODIFIED FIX LOGIC ---
+
+                            # logger.info(f"Final tool name for NVIDIA agent schema: {tool_name}")
+                            
+                            tool_description = getattr(tool_obj, 'description', 'No description available')
+                            if not isinstance(tool_description, str):
+                                tool_description = str(tool_description)
+                            
+                            run_func = getattr(tool_obj, 'run', None)
+                            if not callable(run_func):
+                                logger.error(f"Tool object {original_tool_name} does not have a callable 'run' method. Skipping.")
+                                continue 
+
+                            args_schema = getattr(tool_obj, 'args_schema', None)
+
+                            structured_tool = StructuredTool.from_function(
+                                func=run_func,
+                                name=tool_name, 
+                                description=tool_description,
+                                return_direct=getattr(tool_obj, 'return_direct', False),
+                                args_schema=args_schema,
+                            )
+                            processed_nvidia_tools.append(structured_tool)
+                            # logger.info(f"Processed tool {original_tool_name} -> {tool_name} for NVIDIA compatibility")
+                        except Exception as tool_e:
+                            logger.warning(f"Could not process tool {getattr(tool_obj, 'name', 'unknown')} for NVIDIA formatting: {tool_e}", exc_info=True)
+                
+                tools_to_pass = processed_nvidia_tools # Use the processed list for NVIDIA
+                logger.info(f"NVIDIA agent: using {len(tools_to_pass)} processed tools.")
+            else:
+                # Standard handling for non-NVIDIA models
+                logger.info(f"Standard agent: using {len(tools_to_pass)} tools.")
+
+            # Determine the LLM to use for agent creation
+            current_llm = self.llm
+            if not tools_to_pass: # If, after all processing, the list of tools is empty
+                logger.warning(
+                    "No tools available for the agent after processing/filtering. "
+                    "Binding LLM with tool_choice='none' to prevent API errors."
+                )
+                # Create a new runnable with tool_choice bound to "none"
+                # This does not modify self.llm on the component instance.
+                try:
+                    current_llm = self.llm.bind(tool_choice="none")
+                    logger.info("Successfully bound LLM with tool_choice='none'.")
+                except Exception as bind_e:
+                    logger.error(f"Failed to bind LLM with tool_choice='none': {bind_e}. Proceeding with original LLM.", exc_info=True)
+                    # If binding fails, we proceed with the original LLM and an empty tool list,
+                    # which might still lead to an API error, but we've logged the attempt.
+            
+            logger.info(f"Creating agent with {len(tools_to_pass)} tools and LLM: {current_llm.__class__.__name__}")
+            if hasattr(current_llm, 'tool_choice'):
+                 logger.info(f"LLM effective tool_choice for agent creation: {current_llm.tool_choice}")
+            elif hasattr(current_llm, 'lc_kwargs') and 'tool_choice' in current_llm.lc_kwargs: # Check bound kwargs
+                 logger.info(f"LLM effective tool_choice (from lc_kwargs) for agent creation: {current_llm.lc_kwargs['tool_choice']}")
+
+
+            return create_tool_calling_agent(current_llm, tools_to_pass, prompt)
+                
         except NotImplementedError as e:
             message = f"{self.display_name} does not support tool calling. Please try using a compatible model."
+            logger.error(message, exc_info=True)
             raise NotImplementedError(message) from e
+        except Exception as e_main:
+             logger.error(f"Failed to create agent runnable: {e_main}", exc_info=True)
+             raise

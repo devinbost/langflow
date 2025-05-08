@@ -52,6 +52,14 @@ class AgentComponent(ToolCallingAgentComponent):
             value="You are a helpful assistant that can use tools to answer questions and perform tasks.",
             advanced=False,
         ),
+        BoolInput(
+            name="detailed_thinking",
+            display_name="Detailed Thinking",
+            info="If true, the model will return a detailed thought process. Only supported by NVIDIA reasoning models.",
+            value=False,
+            advanced=True,
+            show=False,
+        ),
         *LCToolsAgentComponent._base_inputs,
         *memory_inputs,
         BoolInput(
@@ -92,13 +100,42 @@ class AgentComponent(ToolCallingAgentComponent):
                 raise ValueError(msg)
 
             # Set up and run agent
-            self.set(
-                llm=llm_model,
-                tools=self.tools,
-                chat_history=self.chat_history,
-                input_value=self.input_value,
-                system_prompt=self.system_prompt,
-            )
+            # Create base params for the agent with required fields
+            agent_params = {
+                "llm": llm_model,
+                "tools": self.tools,
+            }
+            
+            # Ensure input_value has a value
+            if hasattr(self, 'input_value') and self.input_value:
+                agent_params["input_value"] = self.input_value
+            else:
+                agent_params["input_value"] = "What can you help me with?"
+                logger.warning("Input value was empty or missing, using default")
+            
+            # Ensure system_prompt has a value
+            if hasattr(self, 'system_prompt') and self.system_prompt:
+                agent_params["system_prompt"] = self.system_prompt
+            else:
+                agent_params["system_prompt"] = "You are a helpful assistant that can use tools to answer questions and perform tasks."
+                logger.warning("System prompt was empty or missing, using default")
+            
+            # Add chat_history if available
+            if self.chat_history is not None:
+                agent_params["chat_history"] = self.chat_history
+            
+            # Special handling for model-specific parameters (like detailed_thinking for NVIDIA)
+            # Use model_name to check if it's an NVIDIA model
+            if self.agent_llm == "NVIDIA" and hasattr(self, 'detailed_thinking') and isinstance(self.detailed_thinking, bool):
+                agent_params["detailed_thinking"] = self.detailed_thinking
+                logger.info(f"Setting detailed_thinking={self.detailed_thinking} for NVIDIA model in agent parameters")
+            
+            # Set the parameters on self
+            try:
+                self.set(**agent_params)
+            except Exception as e:
+                logger.error(f"Error setting agent parameters: {e}")
+                raise
             agent = self.create_agent_runnable()
             return await self.run_agent(agent)
 
@@ -144,23 +181,82 @@ class AgentComponent(ToolCallingAgentComponent):
             raise ValueError(msg) from e
 
     def _build_llm_model(self, component, inputs, prefix=""):
-        model_kwargs = {input_.name: getattr(self, f"{prefix}{input_.name}") for input_ in inputs}
-        return component.set(**model_kwargs).build_model()
+        # Create a dictionary of valid input parameters
+        model_kwargs = {}
+        
+        # Safely get input values that exist
+        for input_ in inputs:
+            param_name = f"{prefix}{input_.name}"
+            if hasattr(self, param_name) and getattr(self, param_name) is not None:
+                model_kwargs[input_.name] = getattr(self, param_name)
+        
+        # Special handling for NVIDIA models
+        if self.agent_llm == "NVIDIA":
+            # Set tool_model_enabled if not already present
+            if "tool_model_enabled" not in model_kwargs:
+                model_kwargs["tool_model_enabled"] = False
+                
+            # Add detailed_thinking only if it's a valid boolean (True/False)
+            if hasattr(self, "detailed_thinking") and isinstance(self.detailed_thinking, bool):
+                model_kwargs["detailed_thinking"] = self.detailed_thinking
+        
+        # Build and return the model
+        try:
+            return component.set(**model_kwargs).build_model()
+        except Exception as e:
+            logger.error(f"Error building LLM model with params: {model_kwargs}")
+            raise
 
     def set_component_params(self, component):
         provider_info = MODEL_PROVIDERS_DICT.get(self.agent_llm)
         if provider_info:
             inputs = provider_info.get("inputs")
             prefix = provider_info.get("prefix")
-            model_kwargs = {input_.name: getattr(self, f"{prefix}{input_.name}") for input_ in inputs}
+            
+            # Create a dictionary of valid input parameters
+            model_kwargs = {}
+            
+            # Safely get input values that exist and are not None
+            for input_ in inputs:
+                param_name = f"{prefix}{input_.name}"
+                if hasattr(self, param_name) and getattr(self, param_name) is not None:
+                    model_kwargs[input_.name] = getattr(self, param_name)
+            
+            # Special handling for NVIDIA models
+            if self.agent_llm == "NVIDIA":
+                # Set tool_model_enabled if not already present
+                if "tool_model_enabled" not in model_kwargs:
+                    model_kwargs["tool_model_enabled"] = False
+                    
+                # Add detailed_thinking only if it's a valid boolean (True/False)
+                if hasattr(self, "detailed_thinking") and isinstance(self.detailed_thinking, bool):
+                    model_kwargs["detailed_thinking"] = self.detailed_thinking
 
-            return component.set(**model_kwargs)
+            # Set the parameters on the component
+            try:
+                return component.set(**model_kwargs)
+            except Exception as e:
+                logger.error(f"Error setting component parameters: {model_kwargs}")
+                raise
+                
         return component
 
     def delete_fields(self, build_config: dotdict, fields: dict | list[str]) -> None:
-        """Delete specified fields from build_config."""
-        for field in fields:
-            build_config.pop(field, None)
+        """Delete specified fields from build_config, ensuring core fields are kept."""
+        # Convert dict keys to list if needed
+        field_keys = fields if isinstance(fields, list) else list(fields.keys())
+        
+        # Define core agent fields that should NOT be deleted during provider cleanup
+        core_agent_fields_to_keep = {
+            "detailed_thinking", 
+            # Add other essential AgentComponent fields here if they might also be at risk
+            # e.g., "system_prompt", "tools", "input_value", "max_iterations", etc. ???
+            # For now, just protecting detailed_thinking as it's the known issue.
+        }
+
+        for field in field_keys:
+            if field not in core_agent_fields_to_keep:
+                build_config.pop(field, None)
 
     def update_input_types(self, build_config: dotdict) -> dotdict:
         """Update input types for all fields in build_config."""
@@ -175,15 +271,50 @@ class AgentComponent(ToolCallingAgentComponent):
     async def update_build_config(
         self, build_config: dotdict, field_value: str, field_name: str | None = None
     ) -> dotdict:
+        # Ensure build_config is a dotdict if it's not already
+        if not isinstance(build_config, dotdict):
+            build_config = dotdict(build_config)
+
+        # Define base required keys (excluding provider-specific ones like detailed_thinking)
+        base_default_keys = [
+            "code", "_type", "agent_llm", "tools", "input_value",
+            "add_current_date_tool", "system_prompt",
+            "agent_description", "max_iterations", "handle_parsing_errors", "verbose",
+        ]
+
         # Iterate over all providers in the MODEL_PROVIDERS_DICT
         # Existing logic for updating build_config
         if field_name in ("agent_llm",):
             build_config["agent_llm"]["value"] = field_value
             provider_info = MODEL_PROVIDERS_DICT.get(field_value)
+            
+            # Ensure detailed_thinking field exists if provider is NVIDIA, manage its show/hide/value state
+            if "detailed_thinking" not in build_config:
+                # If detailed_thinking is entirely missing, add it from its definition
+                dt_input_def = next((inp for inp in self.inputs if inp.name == "detailed_thinking"), None)
+                if dt_input_def:
+                    build_config["detailed_thinking"] = dt_input_def.to_dict()
+                # Add fallback if needed (as before)
+                else: 
+                    build_config["detailed_thinking"] = {
+                        "name": "detailed_thinking", "display_name": "Detailed Thinking",
+                        "info": "If true, the model will return a detailed thought process. Only supported by NVIDIA reasoning models.",
+                        "value": False, "advanced": True, "show": False, "type": "bool",
+                        "required": False, "placeholder": "", "style": None, "input_types": None, "options": None, "list": False,
+                        "multiline": False, "file_types": [], "refresh": False, "password": False, "is_state": False,
+                        "secret": False
+                    }
+            
+            # Update show/hide/value based on the selected provider (field_value)
+            if field_value == "NVIDIA":
+                build_config["detailed_thinking"]["show"] = True
+            else:
+                build_config["detailed_thinking"]["show"] = False
+                build_config["detailed_thinking"]["value"] = False # Reset value if not NVIDIA
+            
             if provider_info:
                 component_class = provider_info.get("component_class")
                 if component_class and hasattr(component_class, "update_build_config"):
-                    # Call the component class's update_build_config method
                     build_config = await update_component_build_config(
                         component_class, build_config, field_value, "model_name"
                     )
@@ -202,53 +333,39 @@ class AgentComponent(ToolCallingAgentComponent):
             if field_value in provider_configs:
                 fields_to_add, fields_to_delete = provider_configs[field_value]
 
-                # Delete fields from other providers
                 for fields in fields_to_delete:
-                    self.delete_fields(build_config, fields)
+                    self.delete_fields(build_config, fields) # delete_fields already protects detailed_thinking
 
-                # Add provider-specific fields
                 if field_value == "OpenAI" and not any(field in build_config for field in fields_to_add):
                     build_config.update(fields_to_add)
                 else:
                     build_config.update(fields_to_add)
-                # Reset input types for agent_llm
                 build_config["agent_llm"]["input_types"] = []
             elif field_value == "Custom":
-                # Delete all provider fields
-                self.delete_fields(build_config, ALL_PROVIDER_FIELDS)
-                # Update with custom component
+                self.delete_fields(build_config, ALL_PROVIDER_FIELDS) # delete_fields already protects detailed_thinking
                 custom_component = DropdownInput(
-                    name="agent_llm",
-                    display_name="Language Model",
+                    name="agent_llm", display_name="Language Model",
                     options=[*sorted(MODEL_PROVIDERS_DICT.keys()), "Custom"],
-                    value="Custom",
-                    real_time_refresh=True,
-                    input_types=["LanguageModel"],
-                    options_metadata=[MODELS_METADATA[key] for key in sorted(MODELS_METADATA.keys())]
-                    + [{"icon": "brain"}],
+                    value="Custom", real_time_refresh=True, input_types=["LanguageModel"],
+                    options_metadata=[MODELS_METADATA[key] for key in sorted(MODELS_METADATA.keys())] + [{"icon": "brain"}],
                 )
                 build_config.update({"agent_llm": custom_component.to_dict()})
-            # Update input types for all fields
             build_config = self.update_input_types(build_config)
 
-            # Validate required keys
-            default_keys = [
-                "code",
-                "_type",
-                "agent_llm",
-                "tools",
-                "input_value",
-                "add_current_date_tool",
-                "system_prompt",
-                "agent_description",
-                "max_iterations",
-                "handle_parsing_errors",
-                "verbose",
-            ]
-            missing_keys = [key for key in default_keys if key not in build_config]
+            # --- Conditional Validation Logic --- 
+            keys_to_validate = base_default_keys[:] # Start with base keys
+            if field_value == "NVIDIA":
+                # Only require detailed_thinking if NVIDIA is the selected provider
+                keys_to_validate.append("detailed_thinking")
+            
+            missing_keys = [key for key in keys_to_validate if key not in build_config]
             if missing_keys:
+                # Log the current state of build_config for easier debugging
+                logger.error(f"update_build_config: Missing required keys: {missing_keys}. Current build_config keys: {list(build_config.keys())}")
                 msg = f"Missing required keys in build_config: {missing_keys}"
                 raise ValueError(msg)
+            # --- End Conditional Validation Logic --- 
+
         if (
             isinstance(self.agent_llm, str)
             and self.agent_llm in MODEL_PROVIDERS_DICT
