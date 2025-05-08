@@ -1,6 +1,7 @@
 from typing import Any, Iterator, AsyncIterator, List, Optional, Sequence, Union, Callable, Dict, Type
 
 from loguru import logger
+import logging
 from pydantic.v1 import SecretStr, BaseModel
 from requests.exceptions import ConnectionError  # noqa: A004
 from urllib3.exceptions import MaxRetryError, NameResolutionError
@@ -21,6 +22,8 @@ from langflow.utils.nvidia_utils import clean_nvidia_message_content, _validate_
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 
+# Create a logger for this module if it doesn't use loguru for these debugs
+module_logger = logging.getLogger(__name__) # Use this for new logs
 
 class NvidiaChatModelOutputWrapper(BaseChatModel):
     """
@@ -34,6 +37,7 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
         super().__init__(**kwargs) 
         # Set actual_llm as a regular instance attribute, bypassing pydantic field validation
         object.__setattr__(self, "actual_llm", llm)
+        module_logger.debug(f"NVIDIA_WRAPPER: Initialized with LLM: {llm}")
 
     def _generate(
         self,
@@ -44,14 +48,23 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
     ) -> ChatResult:
         # Pass messages directly to the underlying model
         actual_llm_instance = object.__getattribute__(self, 'actual_llm')
+        module_logger.debug(f"NVIDIA_WRAPPER: _generate - Input messages: {messages}")
+        module_logger.debug(f"NVIDIA_WRAPPER: _generate - Calling actual LLM ({actual_llm_instance.__class__.__name__}) _generate")
         result: ChatResult = actual_llm_instance._generate(
             messages, stop=stop, run_manager=run_manager, **kwargs # Pass original messages
         )
+        module_logger.debug(f"NVIDIA_WRAPPER: _generate - Result from actual LLM: {result.generations[0].message.content[:100] if result.generations else 'N/A'}, tool_calls: {result.generations[0].message.tool_calls if result.generations and hasattr(result.generations[0].message, 'tool_calls') else 'N/A'}")
+
         # Clean the response (existing logic)
         if result.generations and isinstance(result.generations, list):
             for gen_idx, gen_item in enumerate(result.generations):
                 if isinstance(gen_item, Generation) and hasattr(gen_item, "message") and isinstance(gen_item.message, (AIMessage, AIMessageChunk)):
-                    result.generations[gen_idx].message = clean_nvidia_message_content(gen_item.message) # type: ignore
+                    original_message_repr = repr(gen_item.message)
+                    module_logger.debug(f"NVIDIA_WRAPPER: _generate - Before cleaning generation {gen_idx}: {original_message_repr[:200]}")
+                    cleaned_message = clean_nvidia_message_content(gen_item.message)
+                    result.generations[gen_idx].message = cleaned_message # type: ignore
+                    if repr(cleaned_message)[:200] != original_message_repr[:200]:
+                         module_logger.debug(f"NVIDIA_WRAPPER: _generate - After cleaning generation {gen_idx}: {repr(cleaned_message)[:200]}")
         return result
 
     async def _agenerate(
@@ -63,14 +76,23 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
     ) -> ChatResult:
         # Pass messages directly
         actual_llm_instance = object.__getattribute__(self, 'actual_llm')
+        module_logger.debug(f"NVIDIA_WRAPPER: _agenerate - Input messages: {messages}")
+        module_logger.debug(f"NVIDIA_WRAPPER: _agenerate - Calling actual LLM ({actual_llm_instance.__class__.__name__}) _agenerate")
         result: ChatResult = await actual_llm_instance._agenerate(
             messages, stop=stop, run_manager=run_manager, **kwargs # Pass original messages
         )
+        module_logger.debug(f"NVIDIA_WRAPPER: _agenerate - Result from actual LLM: {result.generations[0].message.content[:100] if result.generations else 'N/A'}, tool_calls: {result.generations[0].message.tool_calls if result.generations and hasattr(result.generations[0].message, 'tool_calls') else 'N/A'}")
+
         # Clean the response (existing logic)
         if result.generations and isinstance(result.generations, list):
             for gen_idx, gen_item in enumerate(result.generations):
                  if isinstance(gen_item, Generation) and hasattr(gen_item, "message") and isinstance(gen_item.message, (AIMessage, AIMessageChunk)):
-                    result.generations[gen_idx].message = clean_nvidia_message_content(gen_item.message) # type: ignore
+                    original_message_repr = repr(gen_item.message)
+                    module_logger.debug(f"NVIDIA_WRAPPER: _agenerate - Before cleaning generation {gen_idx}: {original_message_repr[:200]}")
+                    cleaned_message = clean_nvidia_message_content(gen_item.message)
+                    result.generations[gen_idx].message = cleaned_message # type: ignore
+                    if repr(cleaned_message)[:200] != original_message_repr[:200]:
+                         module_logger.debug(f"NVIDIA_WRAPPER: _agenerate - After cleaning generation {gen_idx}: {repr(cleaned_message)[:200]}")
         return result
 
     def _stream(
@@ -82,13 +104,21 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
     ) -> Iterator[ChatGenerationChunk]:
         # Pass messages directly
         actual_llm_instance = object.__getattribute__(self, 'actual_llm')
+        module_logger.debug(f"NVIDIA_WRAPPER: _stream - Input messages: {messages}")
+        module_logger.debug(f"NVIDIA_WRAPPER: _stream - Calling actual LLM ({actual_llm_instance.__class__.__name__}) _stream")
         original_iterator = actual_llm_instance._stream(
             messages, stop=stop, run_manager=run_manager, **kwargs # Pass original messages
         )
         # Clean the response chunks (existing logic)
-        for chunk in original_iterator:
+        for chunk_idx, chunk in enumerate(original_iterator):
+            module_logger.debug(f"NVIDIA_WRAPPER: _stream - Received chunk {chunk_idx} from actual LLM: {chunk.message.content[:100] if hasattr(chunk, 'message') else 'N/A'}, tool_call_chunks: {chunk.message.tool_call_chunks if hasattr(chunk, 'message') and hasattr(chunk.message, 'tool_call_chunks') else 'N/A'}")
             if hasattr(chunk, "message") and isinstance(chunk.message, AIMessageChunk):
-                chunk.message = clean_nvidia_message_content(chunk.message) # type: ignore
+                original_chunk_repr = repr(chunk.message)
+                module_logger.debug(f"NVIDIA_WRAPPER: _stream - Before cleaning chunk {chunk_idx}: {original_chunk_repr[:200]}")
+                cleaned_message_chunk = clean_nvidia_message_content(chunk.message)
+                chunk.message = cleaned_message_chunk # type: ignore
+                if repr(cleaned_message_chunk)[:200] != original_chunk_repr[:200]:
+                    module_logger.debug(f"NVIDIA_WRAPPER: _stream - After cleaning chunk {chunk_idx}: {repr(cleaned_message_chunk)[:200]}")
             yield chunk
 
     async def _astream(
@@ -100,13 +130,21 @@ class NvidiaChatModelOutputWrapper(BaseChatModel):
     ) -> AsyncIterator[ChatGenerationChunk]:
         # Pass messages directly
         actual_llm_instance = object.__getattribute__(self, 'actual_llm')
+        module_logger.debug(f"NVIDIA_WRAPPER: _astream - Input messages: {messages}")
+        module_logger.debug(f"NVIDIA_WRAPPER: _astream - Calling actual LLM ({actual_llm_instance.__class__.__name__}) _astream")
         original_iterator = actual_llm_instance._astream(
             messages, stop=stop, run_manager=run_manager, **kwargs # Pass original messages
         )
         # Clean the response chunks (existing logic)
-        async for chunk in original_iterator:
+        async for chunk_idx, chunk in enumerate(original_iterator):
+            module_logger.debug(f"NVIDIA_WRAPPER: _astream - Received chunk {chunk_idx} from actual LLM: {chunk.message.content[:100] if hasattr(chunk, 'message') else 'N/A'}, tool_call_chunks: {chunk.message.tool_call_chunks if hasattr(chunk, 'message') and hasattr(chunk.message, 'tool_call_chunks') else 'N/A'}")
             if hasattr(chunk, "message") and isinstance(chunk.message, AIMessageChunk):
-                chunk.message = clean_nvidia_message_content(chunk.message) # type: ignore
+                original_chunk_repr = repr(chunk.message)
+                module_logger.debug(f"NVIDIA_WRAPPER: _astream - Before cleaning chunk {chunk_idx}: {original_chunk_repr[:200]}")
+                cleaned_message_chunk = clean_nvidia_message_content(chunk.message)
+                chunk.message = cleaned_message_chunk # type: ignore
+                if repr(cleaned_message_chunk)[:200] != original_chunk_repr[:200]:
+                    module_logger.debug(f"NVIDIA_WRAPPER: _astream - After cleaning chunk {chunk_idx}: {repr(cleaned_message_chunk)[:200]}")
             yield chunk
             
     @property
