@@ -242,9 +242,21 @@ class AgentComponent(ToolCallingAgentComponent):
         return component
 
     def delete_fields(self, build_config: dotdict, fields: dict | list[str]) -> None:
-        """Delete specified fields from build_config."""
-        for field in fields:
-            build_config.pop(field, None)
+        """Delete specified fields from build_config, ensuring core fields are kept."""
+        # Convert dict keys to list if needed
+        field_keys = fields if isinstance(fields, list) else list(fields.keys())
+        
+        # Define core agent fields that should NOT be deleted during provider cleanup
+        core_agent_fields_to_keep = {
+            "detailed_thinking", 
+            # Add other essential AgentComponent fields here if they might also be at risk
+            # e.g., "system_prompt", "tools", "input_value", "max_iterations", etc. ???
+            # For now, just protecting detailed_thinking as it's the known issue.
+        }
+
+        for field in field_keys:
+            if field not in core_agent_fields_to_keep:
+                build_config.pop(field, None)
 
     def update_input_types(self, build_config: dotdict) -> dotdict:
         """Update input types for all fields in build_config."""
@@ -263,30 +275,37 @@ class AgentComponent(ToolCallingAgentComponent):
         if not isinstance(build_config, dotdict):
             build_config = dotdict(build_config)
 
+        # Define base required keys (excluding provider-specific ones like detailed_thinking)
+        base_default_keys = [
+            "code", "_type", "agent_llm", "tools", "input_value",
+            "add_current_date_tool", "system_prompt",
+            "agent_description", "max_iterations", "handle_parsing_errors", "verbose",
+        ]
+
         # Iterate over all providers in the MODEL_PROVIDERS_DICT
         # Existing logic for updating build_config
         if field_name in ("agent_llm",):
             build_config["agent_llm"]["value"] = field_value
             provider_info = MODEL_PROVIDERS_DICT.get(field_value)
             
-            # Handle the detailed_thinking field visibility based on model provider
+            # Ensure detailed_thinking field exists if provider is NVIDIA, manage its show/hide/value state
             if "detailed_thinking" not in build_config:
                 # If detailed_thinking is entirely missing, add it from its definition
                 dt_input_def = next((inp for inp in self.inputs if inp.name == "detailed_thinking"), None)
                 if dt_input_def:
                     build_config["detailed_thinking"] = dt_input_def.to_dict()
-                else: # Fallback, though self.inputs should contain it
+                # Add fallback if needed (as before)
+                else: 
                     build_config["detailed_thinking"] = {
                         "name": "detailed_thinking", "display_name": "Detailed Thinking",
                         "info": "If true, the model will return a detailed thought process. Only supported by NVIDIA reasoning models.",
                         "value": False, "advanced": True, "show": False, "type": "bool",
-                        "required": False, # Assuming it's not strictly required if added like this
-                        "placeholder": "", "style": None, "input_types": None, "options": None, "list": False,
+                        "required": False, "placeholder": "", "style": None, "input_types": None, "options": None, "list": False,
                         "multiline": False, "file_types": [], "refresh": False, "password": False, "is_state": False,
                         "secret": False
                     }
             
-            # Now that we're sure "detailed_thinking" exists in build_config:
+            # Update show/hide/value based on the selected provider (field_value)
             if field_value == "NVIDIA":
                 build_config["detailed_thinking"]["show"] = True
             else:
@@ -315,7 +334,7 @@ class AgentComponent(ToolCallingAgentComponent):
                 fields_to_add, fields_to_delete = provider_configs[field_value]
 
                 for fields in fields_to_delete:
-                    self.delete_fields(build_config, fields)
+                    self.delete_fields(build_config, fields) # delete_fields already protects detailed_thinking
 
                 if field_value == "OpenAI" and not any(field in build_config for field in fields_to_add):
                     build_config.update(fields_to_add)
@@ -323,38 +342,30 @@ class AgentComponent(ToolCallingAgentComponent):
                     build_config.update(fields_to_add)
                 build_config["agent_llm"]["input_types"] = []
             elif field_value == "Custom":
-                self.delete_fields(build_config, ALL_PROVIDER_FIELDS)
+                self.delete_fields(build_config, ALL_PROVIDER_FIELDS) # delete_fields already protects detailed_thinking
                 custom_component = DropdownInput(
-                    name="agent_llm",
-                    display_name="Language Model",
+                    name="agent_llm", display_name="Language Model",
                     options=[*sorted(MODEL_PROVIDERS_DICT.keys()), "Custom"],
-                    value="Custom",
-                    real_time_refresh=True,
-                    input_types=["LanguageModel"],
-                    options_metadata=[MODELS_METADATA[key] for key in sorted(MODELS_METADATA.keys())]
-                    + [{"icon": "brain"}],
+                    value="Custom", real_time_refresh=True, input_types=["LanguageModel"],
+                    options_metadata=[MODELS_METADATA[key] for key in sorted(MODELS_METADATA.keys())] + [{"icon": "brain"}],
                 )
                 build_config.update({"agent_llm": custom_component.to_dict()})
             build_config = self.update_input_types(build_config)
 
-            # Validate required keys
-            default_keys = [
-                "code", "_type", "agent_llm", "tools", "input_value",
-                "add_current_date_tool", "system_prompt", "detailed_thinking",
-                "agent_description", "max_iterations", "handle_parsing_errors", "verbose",
-            ]
-            # Ensure all default_keys are present; if not, it's an issue with the build_config structure
-            # or how fields are managed. The previous addition of 'detailed_thinking' handles one specific case.
-            # A more general approach would be to iterate default_keys and add any missing one with its
-            # definition from self.inputs, but this might mask other issues.
-            # For now, the explicit handling of detailed_thinking above should address the specific test failure.
-
-            missing_keys = [key for key in default_keys if key not in build_config]
+            # --- Conditional Validation Logic --- 
+            keys_to_validate = base_default_keys[:] # Start with base keys
+            if field_value == "NVIDIA":
+                # Only require detailed_thinking if NVIDIA is the selected provider
+                keys_to_validate.append("detailed_thinking")
+            
+            missing_keys = [key for key in keys_to_validate if key not in build_config]
             if missing_keys:
                 # Log the current state of build_config for easier debugging
                 logger.error(f"update_build_config: Missing required keys: {missing_keys}. Current build_config keys: {list(build_config.keys())}")
                 msg = f"Missing required keys in build_config: {missing_keys}"
                 raise ValueError(msg)
+            # --- End Conditional Validation Logic --- 
+
         if (
             isinstance(self.agent_llm, str)
             and self.agent_llm in MODEL_PROVIDERS_DICT
