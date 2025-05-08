@@ -1,5 +1,6 @@
 from langchain.agents import create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.tools import StructuredTool
 
 from langflow.base.agents.agent import LCToolsAgentComponent
 from langflow.inputs import MessageTextInput
@@ -158,24 +159,26 @@ class ToolCallingAgentComponent(LCToolsAgentComponent):
             except Exception as e_check:
                 logger.warning(f"Could not reliably determine if model is NVIDIA: {e_check}")
 
+            tools_to_pass = self.tools or [] # Default to self.tools or an empty list
+
             if is_nvidia_model:
                 logger.info("Applying NVIDIA specific tool handling.")
-                tools_copy = []
-                for tool_obj in (self.tools or []):
-                    if hasattr(tool_obj, 'to_openai_tool'):
-                        tools_copy.append(tool_obj)
+                processed_nvidia_tools = []
+                for tool_obj in (self.tools or []): # Iterate over original self.tools
+                    if hasattr(tool_obj, 'to_openai_tool'): # Check if it's already OpenAI-compatible (less likely for NVIDIA custom path)
+                        processed_nvidia_tools.append(tool_obj)
                     else:
                         try:
                             original_tool_name = getattr(tool_obj, 'name', 'unknown')
-                            logger.info(f"Tool info - class: {tool_obj.__class__.__name__}, name before NVIDIA fix: {original_tool_name}")
+                            # logger.info(f"Tool info - class: {tool_obj.__class__.__name__}, name before NVIDIA fix: {original_tool_name}")
 
                             # --- MODIFIED FIX LOGIC ---
                             if original_tool_name == "evaluate_expression":
                                 tool_name = "calculate"
-                                logger.info(f"Forcing tool name 'evaluate_expression' to 'calculate' for NVIDIA agent.")
+                                # logger.info(f"Forcing tool name 'evaluate_expression' to 'calculate' for NVIDIA agent.")
                             elif original_tool_name == "evaluate_expressionevaluate_expression":
                                 tool_name = "calculate"
-                                logger.info(f"Fixing duplicated tool name '{original_tool_name}' to 'calculate' for NVIDIA agent.")
+                                # logger.info(f"Fixing duplicated tool name '{original_tool_name}' to 'calculate' for NVIDIA agent.")
                             else:
                                 # Apply generic duplication fix if needed
                                 if original_tool_name and len(original_tool_name) >= 6:
@@ -183,7 +186,7 @@ class ToolCallingAgentComponent(LCToolsAgentComponent):
                                      first_half = original_tool_name[:half_len]
                                      second_half = original_tool_name[half_len:]
                                      if first_half == second_half:
-                                         logger.warning(f"Fixing generic duplicated name: {original_tool_name} -> {first_half}")
+                                         # logger.warning(f"Fixing generic duplicated name: {original_tool_name} -> {first_half}")
                                          tool_name = first_half
                                      else:
                                          tool_name = original_tool_name
@@ -191,47 +194,62 @@ class ToolCallingAgentComponent(LCToolsAgentComponent):
                                     tool_name = original_tool_name
                             # --- END MODIFIED FIX LOGIC ---
 
-                            logger.info(f"Final tool name for NVIDIA agent schema: {tool_name}")
+                            # logger.info(f"Final tool name for NVIDIA agent schema: {tool_name}")
                             
-                            # Extract description safely
                             tool_description = getattr(tool_obj, 'description', 'No description available')
                             if not isinstance(tool_description, str):
-                                tool_description = str(tool_description) # Ensure string
+                                tool_description = str(tool_description)
                             
-                            # Extract run function safely
-                            # Needs the actual execution logic. tool_obj.run might be correct,
-                            # but ensure it exists and is callable.
                             run_func = getattr(tool_obj, 'run', None)
                             if not callable(run_func):
-                                logger.error(f"Tool object {original_tool_name} does not have a callable 'run' method.")
-                                # Decide whether to skip or raise. Skipping for now.
+                                logger.error(f"Tool object {original_tool_name} does not have a callable 'run' method. Skipping.")
                                 continue 
 
-                            # Extract args_schema safely
                             args_schema = getattr(tool_obj, 'args_schema', None)
 
                             structured_tool = StructuredTool.from_function(
-                                func=run_func, # Use the validated run function
-                                name=tool_name, # Use the definitively corrected name
+                                func=run_func,
+                                name=tool_name, 
                                 description=tool_description,
                                 return_direct=getattr(tool_obj, 'return_direct', False),
-                                args_schema=args_schema, # Pass the schema if it exists
-                                # coroutine=... # Add if async support is needed/available
-                                # verbose=... # Add if needed
+                                args_schema=args_schema,
                             )
-                            tools_copy.append(structured_tool)
-                            logger.info(f"Processed tool {original_tool_name} -> {tool_name} for NVIDIA compatibility")
+                            processed_nvidia_tools.append(structured_tool)
+                            # logger.info(f"Processed tool {original_tool_name} -> {tool_name} for NVIDIA compatibility")
                         except Exception as tool_e:
-                            logger.warning(f"Could not process tool {getattr(tool_obj, 'name', 'unknown')}: {tool_e}", exc_info=True)
-                            # Optionally append the original tool if processing fails, or skip
-                            # tools_copy.append(tool_obj)
+                            logger.warning(f"Could not process tool {getattr(tool_obj, 'name', 'unknown')} for NVIDIA formatting: {tool_e}", exc_info=True)
                 
-                logger.info(f"Creating NVIDIA tool calling agent with {len(tools_copy)} tools")
-                return create_tool_calling_agent(self.llm, tools_copy, prompt)
+                tools_to_pass = processed_nvidia_tools # Use the processed list for NVIDIA
+                logger.info(f"NVIDIA agent: using {len(tools_to_pass)} processed tools.")
             else:
                 # Standard handling for non-NVIDIA models
-                logger.info(f"Creating standard tool calling agent with {len(self.tools or [])} tools")
-                return create_tool_calling_agent(self.llm, self.tools or [], prompt)
+                logger.info(f"Standard agent: using {len(tools_to_pass)} tools.")
+
+            # Determine the LLM to use for agent creation
+            current_llm = self.llm
+            if not tools_to_pass: # If, after all processing, the list of tools is empty
+                logger.warning(
+                    "No tools available for the agent after processing/filtering. "
+                    "Binding LLM with tool_choice='none' to prevent API errors."
+                )
+                # Create a new runnable with tool_choice bound to "none"
+                # This does not modify self.llm on the component instance.
+                try:
+                    current_llm = self.llm.bind(tool_choice="none")
+                    logger.info("Successfully bound LLM with tool_choice='none'.")
+                except Exception as bind_e:
+                    logger.error(f"Failed to bind LLM with tool_choice='none': {bind_e}. Proceeding with original LLM.", exc_info=True)
+                    # If binding fails, we proceed with the original LLM and an empty tool list,
+                    # which might still lead to an API error, but we've logged the attempt.
+            
+            logger.info(f"Creating agent with {len(tools_to_pass)} tools and LLM: {current_llm.__class__.__name__}")
+            if hasattr(current_llm, 'tool_choice'):
+                 logger.info(f"LLM effective tool_choice for agent creation: {current_llm.tool_choice}")
+            elif hasattr(current_llm, 'lc_kwargs') and 'tool_choice' in current_llm.lc_kwargs: # Check bound kwargs
+                 logger.info(f"LLM effective tool_choice (from lc_kwargs) for agent creation: {current_llm.lc_kwargs['tool_choice']}")
+
+
+            return create_tool_calling_agent(current_llm, tools_to_pass, prompt)
                 
         except NotImplementedError as e:
             message = f"{self.display_name} does not support tool calling. Please try using a compatible model."
